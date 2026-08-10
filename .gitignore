@@ -1,13 +1,13 @@
-# project
+# build output
 _site
-.sass-cache
-.vagrant
+.jekyll-cache
+.jekyll-metadata
 
-# general
+# bundler
+.bundle
+vendor
+
+# os
 .DS_Store
 Thumbs.db
 ehthumbs.db
-
-Gemfile.lock
-
-beautiful-jekyll-theme-*.gem

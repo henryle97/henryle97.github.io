@@ -1,0 +1,48 @@
+{%- assign projects = site.data.projects -%}
+{%- if projects and projects.size > 0 %}
+<section class="section" id="projects">
+  <div class="wrap">
+    <div class="project-grid">
+      {%- for project in projects %}
+      <article class="project reveal{% if project.featured %} is-featured{% endif %}">
+        <div class="project-top">
+          <h2 class="project-name">{{ project.name }}</h2>
+          <div class="project-meta">
+            {%- if project.stars %}
+            <span class="project-stars" title="{{ project.stars }} GitHub stars">
+              {% include icon.html name="star" %}{{ project.stars }}
+            </span>
+            {%- endif %}
+            {%- if project.period %}
+            <span>{{ project.period }}</span>
+            {%- endif %}
+          </div>
+        </div>
+
+        <p class="project-summary">{{ project.summary }}</p>
+
+        <div class="project-footer">
+          {%- if project.stack %}
+          <ul class="tags">
+            {%- for item in project.stack %}
+            <li class="tag">{{ item }}</li>
+            {%- endfor %}
+          </ul>
+          {%- endif %}
+
+          {%- if project.links %}
+          <div class="project-links">
+            {%- for link in project.links %}
+            <a href="{{ link.url }}" rel="noopener" target="_blank">
+              {{ link.label }} {% include icon.html name="external" %}
+            </a>
+            {%- endfor %}
+          </div>
+          {%- endif %}
+        </div>
+      </article>
+      {%- endfor %}
+    </div>
+  </div>
+</section>
+{%- endif %}

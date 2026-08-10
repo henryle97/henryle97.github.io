@@ -1,0 +1,16 @@
+{%- assign metrics = site.data.profile.metrics -%}
+{%- if metrics and metrics.size > 0 %}
+<section class="wrap" aria-label="Impact at a glance">
+  <ul class="metrics reveal">
+    {%- for m in metrics %}
+    <li class="metric">
+      <div class="metric-figure">{{ m.figure }}</div>
+      <div class="metric-label">{{ m.label }}</div>
+      {%- if m.source %}
+      <div class="metric-source">{{ m.source }}</div>
+      {%- endif %}
+    </li>
+    {%- endfor %}
+  </ul>
+</section>
+{%- endif %}

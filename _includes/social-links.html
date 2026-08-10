@@ -1,0 +1,31 @@
+{%- assign links = site.data.profile.links -%}
+<ul class="social">
+  {%- if links.github %}
+  <li>
+    <a href="https://github.com/{{ links.github }}" rel="me noopener" target="_blank" aria-label="GitHub" title="GitHub">
+      {% include icon.html name="github" %}
+    </a>
+  </li>
+  {%- endif %}
+  {%- if links.linkedin %}
+  <li>
+    <a href="https://www.linkedin.com/in/{{ links.linkedin }}/" rel="me noopener" target="_blank" aria-label="LinkedIn" title="LinkedIn">
+      {% include icon.html name="linkedin" %}
+    </a>
+  </li>
+  {%- endif %}
+  {%- if links.x %}
+  <li>
+    <a href="https://x.com/{{ links.x }}" rel="me noopener" target="_blank" aria-label="X" title="X">
+      {% include icon.html name="x" %}
+    </a>
+  </li>
+  {%- endif %}
+  {%- if links.email %}
+  <li>
+    <a href="mailto:{{ links.email }}" aria-label="Email" title="Email">
+      {% include icon.html name="mail" %}
+    </a>
+  </li>
+  {%- endif %}
+</ul>

@@ -1,0 +1,24 @@
+{%- assign groups = site.data.skills -%}
+{%- if groups and groups.size > 0 %}
+<section class="section" id="skills">
+  <div class="wrap">
+    <header class="section-head">
+      <span class="section-label">Capabilities</span>
+      <h2 class="section-title">What I go deep on</h2>
+    </header>
+
+    <div class="skills">
+      {%- for group in groups %}
+      <div class="skill-group reveal">
+        <h3>{{ group.group }}</h3>
+        <ul>
+          {%- for item in group.items %}
+          <li>{{ item }}</li>
+          {%- endfor %}
+        </ul>
+      </div>
+      {%- endfor %}
+    </div>
+  </div>
+</section>
+{%- endif %}
