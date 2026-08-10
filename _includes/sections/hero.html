@@ -1,0 +1,45 @@
+{%- assign profile = site.data.profile -%}
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="hero-eyebrow">
+        <span class="hero-dot" aria-hidden="true"></span>
+        {{ profile.location }} · {{ profile.timezone }}
+      </p>
+
+      <h1 class="hero-name">{{ profile.name }}</h1>
+      <p class="hero-role">{{ profile.role }}</p>
+
+      <p class="hero-tagline">{{ profile.tagline }}</p>
+      <p class="hero-intro">{{ profile.intro }}</p>
+
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="{{ profile.links.resume | relative_url }}">
+          {% include icon.html name="file" %} Resume
+        </a>
+        <a class="btn" href="https://github.com/{{ profile.links.github }}" rel="noopener" target="_blank">
+          {% include icon.html name="github" %} GitHub
+        </a>
+        <a class="btn" href="https://www.linkedin.com/in/{{ profile.links.linkedin }}/" rel="noopener" target="_blank">
+          {% include icon.html name="linkedin" %} LinkedIn
+        </a>
+        <a class="btn" href="mailto:{{ profile.links.email }}">
+          {% include icon.html name="mail" %} Email
+        </a>
+      </div>
+    </div>
+
+    <div class="hero-portrait">
+      {%- comment -%}
+        Renders the headshot when the file exists, otherwise a CSS monogram —
+        so a missing photo never leaves a broken image on the page.
+      {%- endcomment -%}
+      {%- assign photo_match = site.static_files | where: 'path', profile.photo -%}
+      {%- if photo_match.size > 0 -%}
+        <img src="{{ profile.photo | relative_url }}" alt="{{ profile.name }}" width="152" height="152">
+      {%- else -%}
+        <span class="hero-monogram" aria-hidden="true">{{ profile.initials }}</span>
+      {%- endif -%}
+    </div>
+  </div>
+</section>

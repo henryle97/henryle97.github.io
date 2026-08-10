@@ -1,0 +1,52 @@
+{%- assign roles = site.data.experience -%}
+{%- if roles and roles.size > 0 %}
+<section class="section" id="experience">
+  <div class="wrap">
+    <header class="section-head">
+      <span class="section-label">Experience</span>
+      <h2 class="section-title">Where I've shipped</h2>
+    </header>
+
+    <ol class="timeline">
+      {%- for role in roles %}
+      <li class="role reveal{% if role.current %} is-current{% endif %}">
+        <div class="role-rail">
+          <div class="role-period">{{ role.start }} — {{ role.end }}</div>
+          {%- if role.current %}
+          <span class="role-current">
+            <span class="hero-dot" aria-hidden="true"></span> Current
+          </span>
+          {%- endif %}
+        </div>
+
+        <div class="role-body">
+          <h3 class="role-title">
+            {{ role.role }}
+            {%- if role.url %}
+            <a class="role-company" href="{{ role.url }}" rel="noopener" target="_blank">· {{ role.company }}</a>
+            {%- else %}
+            <span class="role-company">· {{ role.company }}</span>
+            {%- endif %}
+          </h3>
+          <p class="role-location">{{ role.location }}</p>
+
+          <ul class="role-highlights">
+            {%- for highlight in role.highlights %}
+            <li>{{ highlight }}</li>
+            {%- endfor %}
+          </ul>
+
+          {%- if role.stack %}
+          <ul class="tags">
+            {%- for item in role.stack %}
+            <li class="tag">{{ item }}</li>
+            {%- endfor %}
+          </ul>
+          {%- endif %}
+        </div>
+      </li>
+      {%- endfor %}
+    </ol>
+  </div>
+</section>
+{%- endif %}

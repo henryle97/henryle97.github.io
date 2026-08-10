@@ -1,0 +1,85 @@
+# Career history, newest first. Rendered as the homepage timeline.
+# `current: true` marks the active role with a live dot.
+
+- company: Torilab
+  role: Senior AI Engineer
+  start: Apr 2025
+  end: Present
+  current: true
+  location: Hanoi, Vietnam
+  highlights:
+    - >-
+      Architected and shipped a multi-persona conversational AI platform on
+      LangChain, LangGraph, and the OpenAI Agents SDK — 10+ production avatars
+      across companion and lifestyle-coaching products, serving 2K+ monthly
+      active users.
+    - >-
+      Designed a multi-layer long-term memory system for persona agents,
+      combining a persistent user profile, episodic semantic recall, and rolling
+      session summaries. Enabled cross-session personalization and measurably
+      increased average session length.
+  stack: [LangGraph, LangChain, OpenAI Agents SDK, Vector search, Postgres]
+
+- company: Samsung SDS R&D Center
+  role: Senior AI Engineer
+  start: May 2022
+  end: Apr 2025
+  location: Hanoi, Vietnam
+  highlights:
+    - >-
+      Led end-to-end design of a legal document intelligence platform,
+      architecting a multimodal pipeline over PDFs and images using
+      vision-language models. Deployed a secure on-premise RAG stack with a
+      self-hosted LLM, reranker, and vector search — improving retrieval
+      relevance and cutting processing latency.
+    - >-
+      Built an Intelligent Document Processing platform extracting key
+      information and tables from diverse documents, using Key-Value
+      Understanding, Table Recognition, and Document Reconstruction models on a
+      Django, Celery, and RabbitMQ backend. Applied to digitalize data for
+      several large companies, including a top-3 bank in Vietnam.
+    - >-
+      Developed an end-to-end MLOps pipeline with Kubeflow on Kubernetes,
+      reducing model deployment time by 50% and enabling automated training for
+      10+ production models.
+    - >-
+      Built a Sales Boosting Tool using Key-Value Understanding and TensorRT
+      inference, supporting 50K monthly transactions at 98% accuracy and under
+      1s per request — an 80% reduction in processing time for finance
+      operations.
+  stack: [VLMs, RAG, TensorRT, Kubeflow, Kubernetes, Django, Celery, RabbitMQ]
+
+- company: VinBrain
+  role: Applied Scientist
+  start: Nov 2020
+  end: May 2022
+  location: Hanoi, Vietnam
+  highlights:
+    - >-
+      Built a system for reviewing medical device registration applications for
+      the Ministry of Health, using document alignment, text detection, text
+      recognition, and question-answering models. Optimized deployment via
+      knowledge distillation, reaching 95% accuracy and cutting processing time
+      by 80% versus manual review.
+    - >-
+      Developed a facial stroke alert system using face landmark detection and a
+      classification model, reaching an F1 score of 90% to enable early
+      intervention.
+    - >-
+      Built the eKYC system for the AIViCare app at 95% accuracy, reducing user
+      verification time to under 5 minutes.
+  stack: [OCR, Document QA, Knowledge distillation, PyTorch, eKYC]
+
+- company: VCCorp
+  role: Computer Vision Engineer
+  start: Jul 2019
+  end: Nov 2020
+  location: Hanoi, Vietnam
+  highlights:
+    - >-
+      Built a 3D-CNN video recognition model detecting violent actions at over
+      90% accuracy, used to filter violent content on the Lotus social network.
+    - >-
+      Developed and maintained a MobileNetV3 model for sensitive-content image
+      classification, sustaining 98% accuracy across user-uploaded content.
+  stack: [3D-CNN, MobileNetV3, TensorFlow, Content moderation]

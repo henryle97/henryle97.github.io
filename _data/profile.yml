@@ -1,0 +1,51 @@
+# Identity, contact, and headline numbers.
+# Everything the hero and footer render comes from here.
+
+name: Henry Le
+full_name: Le Van Hoang
+role: Senior AI Engineer
+location: Hanoi, Vietnam
+timezone: UTC+7
+
+# One-line positioning, used in the hero and as the site meta description.
+tagline: >-
+  Seven years shipping AI to production — computer vision, document
+  intelligence, and agentic LLM systems.
+
+# Two or three sentences under the tagline. Keep it concrete.
+intro: >-
+  I build AI systems that survive contact with real users: multimodal document
+  pipelines, retrieval stacks running on-premise, and long-lived conversational
+  agents with memory. Currently at Torilab, previously Samsung SDS R&D Center,
+  VinBrain, and VCCorp.
+
+# Optional headshot at this path. If the file is missing the hero falls back
+# to a CSS monogram, so the page never breaks.
+photo: /assets/img/profile.jpg
+initials: HL
+
+links:
+  email: lehoang2797@gmail.com
+  github: henryle97
+  linkedin: henrylee-dev
+  x: henryle_vn
+  resume: /assets/henry-le-resume.pdf
+  site:
+    label: lessonai.in
+    url: https://lessonai.in
+
+# Headline numbers. Every figure below is traceable to a specific role —
+# `source` is rendered as the caption under the figure.
+metrics:
+  - figure: "7 yrs"
+    label: Shipping AI to production
+    source: Computer vision → document AI → agents
+  - figure: "2K+"
+    label: Monthly active users
+    source: Multi-persona agent platform, Torilab
+  - figure: "50K"
+    label: Monthly transactions
+    source: TensorRT serving at 98% accuracy, Samsung SDS
+  - figure: "10+"
+    label: Models in production
+    source: Automated via Kubeflow on Kubernetes

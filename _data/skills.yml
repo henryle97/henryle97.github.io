@@ -1,0 +1,25 @@
+# Three-column capability matrix, rendered on /about/.
+
+- group: Modeling & Research
+  items:
+    - PyTorch · TensorFlow
+    - Vision — OCR, detection, 3D-CNN
+    - VLMs & multimodal documents
+    - Diffusion — SDXL, LoRA, ControlNet
+    - Knowledge distillation
+
+- group: LLM Systems
+  items:
+    - Agents — LangGraph, Agents SDK
+    - RAG, rerankers, vector search
+    - Long-term & episodic memory
+    - Structured outputs & tool use
+    - Eval harnesses, LLM-as-judge
+
+- group: Production & Serving
+  items:
+    - TensorRT · ONNX inference
+    - Kubeflow · Kubernetes MLOps
+    - Django · FastAPI · Celery
+    - Latency/throughput benchmarking
+    - Postgres · Redis · RabbitMQ

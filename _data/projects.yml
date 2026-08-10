@@ -1,0 +1,64 @@
+# Selected work, rendered on /projects/.
+# `featured: true` pulls a project into the highlighted top row.
+
+- name: LessonAI
+  featured: true
+  period: 2025 — present
+  summary: >-
+    An AI system that turns a teacher's raw vocabulary list into a standalone,
+    interactive English lesson — generation, exercise scaffolding, and delivery
+    in one pipeline.
+  stack: [LLM pipelines, Structured outputs, FastAPI]
+  links:
+    - label: lessonai.in
+      url: https://lessonai.in
+
+- name: xrag
+  featured: true
+  period: 2024 — present
+  summary: >-
+    Retrieval-augmented generation over arbitrary documents — ingestion,
+    chunking, reranking, and evaluation wired into one reusable stack.
+  stack: [RAG, Rerankers, Vector search, Python]
+  links:
+    - label: GitHub
+      url: https://github.com/henryle97/xrag
+
+- name: Spelling Correction Vietnamese
+  featured: true
+  stars: 32
+  period: 2020
+  summary: >-
+    Vietnamese spelling error correction with a Seq2Seq model, handling the
+    diacritic and tone-mark errors that generic spell checkers miss.
+  stack: [Seq2Seq, PyTorch, NLP]
+  links:
+    - label: GitHub
+      url: https://github.com/henryle97/Spelling_Correction_Vietnamese
+
+- name: IDCard-OCR
+  stars: 6
+  period: 2021
+  summary: >-
+    End-to-end recognition of Vietnamese ID cards using a custom CenterNet for
+    corner and field detection paired with a Seq2Seq attention recognizer.
+  stack: [CenterNet, Seq2Seq-Attention, OCR]
+  links:
+    - label: GitHub
+      url: https://github.com/henryle97/IDCard-OCR
+
+- name: AI Interior Design
+  period: 2024
+  summary: >-
+    A web product generating interior design ideas from a photo, built on a
+    generative pipeline of SDXL with custom LoRA, ControlNet, and IP-Adapter,
+    served asynchronously through Django, Celery, and Redis.
+  stack: [SDXL, LoRA, ControlNet, IP-Adapter, Django, Celery, Redis]
+
+- name: AoDai LoRA
+  period: 2023
+  summary: >-
+    A Stable Diffusion LoRA finetuned on thousands of images of the traditional
+    Vietnamese áo dài, capturing silhouette and fabric detail that the base
+    model reliably gets wrong.
+  stack: [Stable Diffusion, LoRA, PyTorch]
