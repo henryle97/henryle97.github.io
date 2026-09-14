@@ -1,0 +1,983 @@
+---
+layout: post
+title: Running DeepSeek-V4-Flash across four free GPUs
+subtitle: >-
+  A runbook for serving DeepSeek-V4-Flash on 4× L4 when the model is nearly
+  twice your total VRAM — seven steps, with every FreeToken flag, startup log
+  line and real error explained.
+dateline: "4× NVIDIA L4 (sm_89) · FreeToken 0.1.2 + PR #70 · Kaggle free tier"
+tags:
+  - inference
+  - mixture-of-experts
+  - gpu
+  - deepseek
+---
+
+<div class="tldr">
+  <h2>TL;DR</h2>
+  <ul>
+    <li><strong>What:</strong> DeepSeek-V4-Flash (167&#8239;GB) served across 4&#215;&#8239;NVIDIA L4 (~96&#8239;GB VRAM total) on Kaggle's free tier &mdash; <strong>20.37 tok/s</strong>, TTFT 6.11&#8239;s, 1331-token prompts prefilled in 16.3&#8239;s, model loaded in 8.8&#8239;min.</li>
+    <li><strong>Why it fits:</strong> ~92% of the checkpoint is routed experts, and top_k&nbsp;8 of 256 means a token touches ~3% of them. The experts stay in host RAM (~154&#8239;GB of 188) and stream over PCIe into a 4080-slot LRU cache in VRAM. Only <strong>3.38&#8239;GiB of dense weights is resident per GPU</strong>.</li>
+    <li><strong>Getting the GPUs:</strong> four L4s are not in Kaggle's accelerator dropdown. Attach a competition, set <code>machine_shape: NvidiaL4</code>, push from the CLI. <code>kernel_type</code> must be <code>notebook</code> or you silently get one P100 &mdash; and the box is then offline by construction, so everything has to be pre-staged.</li>
+    <li><strong>Engine:</strong> FreeToken, because vLLM's expert offload is still an open RFC and nothing else supports DSV4's architecture. Released 0.1.2 refuses TP&gt;1, so this needs PR&nbsp;#70 &mdash; plus a backport of PR&nbsp;#243, or long prompts hang forever on sm_89.</li>
+    <li><strong>The four traps:</strong> <code>--num-tokens</code> silently <em>overrides</em> the memory solver instead of constraining it; a present-but-unimportable <code>sgl_kernel</code> kills all four workers on any prompt &ge;&nbsp;32 tokens; <code>flashinfer</code> imports cleanly and then cannot JIT; and this is a reasoning model, so tokens arrive as <code>reasoning_content</code>, not <code>content</code>.</li>
+    <li><strong>The ceiling:</strong> ~1.05&#8239;GB crosses PCIe per token per rank &mdash; about 85% of the time budget. More GPUs will not help; a better interconnect or a higher cache hit rate will.</li>
+  </ul>
+  <p>Reproduce it: three Kaggle notebooks and <code>kaggle kernels push -p .</code></p>
+</div>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#covers">What this post covers</a></li>
+    <li><a href="#freegpu">Getting four L4s for free</a>
+      <ul><li>Why each condition matters</li><li>What lands</li></ul></li>
+    <li><a href="#machine">The model</a></li>
+    <li><a href="#fit">Will it fit? The ten-minute check</a></li>
+    <li><a href="#engine">The engine, and why not vLLM</a>
+      <ul><li>What the expert cache actually does</li><li>The arithmetic that explains 20 tok/s</li><li>Why not vLLM, llama.cpp or KTransformers</li></ul></li>
+    <li><a href="#step1">Step 1: Getting the model onto the machine</a>
+      <ul><li>Check your disk and your network</li><li>What you actually get</li><li>Staging an offline install</li><li>The two build notebooks</li><li>Push them, then wire them up</li></ul></li>
+    <li><a href="#step2">Step 2: Pick your split, then check it divides</a></li>
+    <li><a href="#step3">Step 3: Install it on the offline box</a>
+      <ul><li>Find the mounts</li><li>Install from the local wheel directory</li><li>Remove the native packages that cannot run here</li><li>Put the CUDA toolchain on PATH</li><li>Apply the sm_89 patch</li></ul></li>
+    <li><a href="#step4">Step 4: The command, and every flag in it</a>
+      <ul><li>Every flag, explained</li><li>The flag not to pass</li></ul></li>
+    <li><a href="#step5">Step 5: How to read the startup log</a>
+      <ul><li>Launch it and wait for the right signal</li></ul></li>
+    <li><a href="#step6">Step 6: Benchmark it</a>
+      <ul><li>The client</li><li>The memory side</li><li>The speed side</li><li>One number we threw away, and why</li></ul></li>
+    <li><a href="#step7">Step 7: Errors you will actually hit</a></li>
+    <li><a href="#wrap">Wrapping up</a></li>
+    <li><a href="#credits">Credits and references</a></li>
+  </ol>
+</nav>
+
+<h2 id="covers">What this post covers</h2>
+
+<p>Sooner or later everyone running big models hits the same wall: the checkpoint is larger than the GPU. The usual answer is to add GPUs, and that part everybody knows. What is less obvious is what to do when adding every GPU you can still leaves you short &mdash; four cards, 96&#8239;GB of VRAM, and a 167&#8239;GB model.</p>
+
+<p>This is a runbook for exactly that case. It walks from an empty notebook to a served model, explains every flag in the launch command, shows the startup log lines that tell you whether your configuration is sane, and ends with the six errors you will actually hit and what each one means. It assumes you can read a stack trace and have used a serving engine before. It does not assume you know anything about mixture-of-experts offload.</p>
+
+<p>Every <em>result</em> here was measured on Kaggle's free tier. Where a figure is borrowed or approximate the text says so. The serving notebook is at <a href="https://www.kaggle.com/code/hisiterbk/dsv4-tp4">kaggle.com/code/hisiterbk/dsv4-tp4</a> &mdash; fork it and you get the launcher, the health-poll loop and the benchmark cells as they actually ran.</p>
+
+<div class="callout">
+  <p><strong>Three places things run, and the post labels every block with which.</strong></p>
+  <ul>
+    <li><strong>Your machine</strong> &mdash; the <code>kaggle</code> CLI and the three <code>kernel-metadata.json</code> files. Nothing heavy happens here; you are only pushing folders.</li>
+    <li><strong>Two build notebooks on Kaggle</strong> (<code>ft-wheels</code>, <code>ft-pr70</code>) &mdash; CPU, internet on. These produce the offline wheel bundle and the patched engine wheel.</li>
+    <li><strong>One serve notebook on Kaggle</strong> (<code>dsv4-tp4</code>) &mdash; 4&#215;&#8239;L4, internet off. Everything from Step 4 onward is a cell in this notebook, including the commands written with a <code>$</code> prompt.</li>
+  </ul>
+  <p>Install <code>pip install kaggle</code> and authenticate with <code>kaggle auth login</code> before anything else.</p>
+</div>
+
+<h2 id="freegpu">Getting four L4s for free</h2>
+
+<div class="nope">
+  <span class="lbl">What didn&rsquo;t work</span>
+  <ul>
+    <li><strong>Picking the L4 from the accelerator dropdown.</strong> It is not in the list, and no amount of clicking puts it there.</li>
+    <li><strong><code>kernel_type: "script"</code>.</strong> The push succeeds, the kernel runs, and you silently get one P100 &mdash; <code>machine_shape</code> is ignored entirely.</li>
+    <li><strong><code>competition_sources</code> with <code>enable_internet: true</code>.</strong> Hard <code>400</code> at push time. You cannot have the accelerator and a network.</li>
+  </ul>
+</div>
+
+<p>This is the part most people do not know exists, so it gets its own section.</p>
+
+<p>Kaggle's free accelerator dropdown offers a P100, two T4s, or a TPU. Four L4s are not in that list &mdash; the shape exists, but you cannot pick it in the UI. You unlock it by <strong>attaching a competition that permits it</strong> and then requesting the shape by name in notebook metadata, pushed from the CLI.</p>
+
+<p>Four conditions, all of which have to hold at once:</p>
+
+<p class="where w-file">File on your machine &mdash; dsv4-tp4/kernel-metadata.json</p>
+<pre><code>{
+  "id": "&lt;owner&gt;/dsv4-tp4",
+  "code_file": "tp4.ipynb",
+  "kernel_type": "notebook",      <b>&lt;- 1. "script" silently downgrades to P100</b>
+  "enable_gpu": "true",
+  "machine_shape": "NvidiaL4",    <b>&lt;- 2. the shape, requested by name</b>
+  "competition_sources": ["arc-prize-2026-arc-agi-2"],  <b>&lt;- 3. what unlocks it</b>
+  "enable_internet": "false",     <b>&lt;- 4. forced by the line above</b>
+  "kernel_sources": ["&lt;owner&gt;/ft-wheels", "&lt;owner&gt;/ft-pr70"],
+  "model_sources": ["dangkhoa2016/deepseek-ai-deepseek-v4-flash-0731/transformers/default/1"]
+}</code></pre>
+
+<p class="where w-local">Your machine &mdash; shell</p>
+<pre><code><span class="p">$</span> kaggle kernels push -p .
+Kernel version 9 successfully pushed.</code></pre>
+
+<h3>Why each condition matters</h3>
+
+<ul>
+  <li><strong><code>kernel_type</code> must be <code>notebook</code>.</strong> A <code>script</code> kernel ignores <code>machine_shape</code> entirely and hands you one P100. No warning and no error &mdash; the push succeeds and you only discover it from <code>nvidia-smi</code>. This is the single easiest way to waste a run.</li>
+  <li><strong>Join the competition first, then attach it.</strong> Open its page, accept the rules, and only then does <code>competition_sources</code> work &mdash; a push referencing a competition you have not joined is rejected. Joining alone changes nothing either: it is the <code>competition_sources</code> entry on the kernel that flips the allocation. You need both.</li>
+  <li><strong><code>enable_internet</code> must be <code>false</code>.</strong> This is the real price. <code>competition_sources</code> together with <code>enable_internet: true</code> is rejected with a hard <code>400</code> at push time, so the box is offline by construction and every wheel, model and patch has to arrive pre-staged through <code>kernel_sources</code> or <code>model_sources</code>. Step 1 covers how.</li>
+  <li><strong>Push from the CLI.</strong> The web editor will not offer you a shape that is not in its dropdown.</li>
+</ul>
+
+<h3>What lands</h3>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Resource</th><th>Free tier, L4 shape</th></tr></thead>
+  <tbody>
+    <tr><td>GPUs</td><td class="n">4 &#215; L4, 23,034 MiB each &mdash; <strong>~96 GB</strong> (90 GiB)</td></tr>
+    <tr><td>Architecture</td><td class="n">sm_89 (Ada), driver 580.159.04</td></tr>
+    <tr><td>Host RAM</td><td class="n">188 GB (cgroup limit 173 GiB)</td></tr>
+    <tr><td>CPU</td><td class="n">46 vCPU</td></tr>
+    <tr><td>Scratch disk</td><td class="n">~1 TB on /kaggle/tmp</td></tr>
+    <tr><td>Interconnect</td><td class="n">PCIe, no NVLink</td></tr>
+    <tr><td>Model storage</td><td class="n">NFSv3 mount, read-only</td></tr>
+    <tr><td>Session limit</td><td class="n">12 hours</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The 188&#8239;GB of host RAM is the underrated half of that table. It is what makes expert offload viable at all &mdash; it holds the ~154&#8239;GB of expert banks that will never fit in VRAM. A four-GPU box with 32&#8239;GB of system memory would not serve this model no matter how the VRAM was arranged.</p>
+
+<div class="callout warn">
+  <p><strong>Two honest caveats.</strong> We verified this with <code>arc-prize-2026-arc-agi-2</code> and did not test every competition &mdash; not all of them permit the L4 shape, so check before you build around one. And the unlock changes <em>which</em> accelerator you may request, not <em>how much</em> of it you get: Kaggle's weekly GPU quota and the 12-hour session cap still apply.</p>
+</div>
+
+<h2 id="machine">The model</h2>
+
+<p>One detail from that table matters more than it looks: these GPUs are not connected by NVLink. Every cross-GPU collective and every expert fetch crosses PCIe. That shapes which parallelism strategy is worth using and, as the arithmetic below shows, sets the ceiling on decode speed.</p>
+
+<p>The model is <strong>DeepSeek-V4-Flash-0731</strong>: 43 layers, 256 routed experts per layer, top_k 8. Dense weights are FP8; the routed experts are FP4, packed into <code>I8</code> tensors with <code>F8_E8M0</code> scale tensors alongside. On disk it is 48 safetensors shards, about 156&#8239;GiB. It advertises a 1,048,576-token context.</p>
+
+<h2 id="fit">Will it fit? The ten-minute check</h2>
+
+<div class="nope">
+  <span class="lbl">What didn&rsquo;t work</span>
+  <ul>
+    <li><strong>The obvious arithmetic.</strong> 167&#8239;GB of weights against 96&#8239;GB of VRAM says no &mdash; and it is right, if every byte has to be resident.</li>
+    <li><strong>Our first estimate of the non-expert weights.</strong> We guessed around 30&#8239;GB and concluded four GPUs were needed just to hold them. The real figure is 13.5&#8239;GiB in total, 3.38&#8239;GiB per rank &mdash; comfortable on a single card. That wrong number shaped the whole plan.</li>
+  </ul>
+</div>
+
+<p>The arithmetic everybody does first is the one that says no. 167&#8239;GB of weights, 96&#8239;GB of VRAM across four cards. Tensor parallelism splits a model but does not shrink it &mdash; every byte still has to be resident on some GPU. On that math you are 71&#8239;GB short and there is no flag that fixes it.</p>
+
+<p>The arithmetic that says yes starts from sparsity. With top_k 8 out of 256 experts, any given token touches about 3% of the expert weights. The other 97% sit idle in VRAM doing nothing but occupying space.</p>
+
+<p>So do not put them in VRAM. FreeToken's <code>offload</code> MoE backend keeps the expert banks in host RAM and maintains a fixed-size LRU slot cache on the GPU, streaming across PCIe the experts each token actually selects. The fit check becomes:</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>What lives where</th><th>Per GPU</th><th>Across 4 GPUs</th></tr></thead>
+  <tbody>
+    <tr><td>Dense weights (TP-sharded)</td><td class="n">3.38 GiB</td><td class="n">13.5 GiB</td></tr>
+    <tr><td>MoE slot cache (tunable)</td><td class="n">~14 GiB</td><td class="n">~56 GiB</td></tr>
+    <tr><td>KV pool (replicated)</td><td class="n">1.08 GiB</td><td class="n">1.08 GiB each</td></tr>
+    <tr><td>CUDA graphs + headroom</td><td class="n">~3.5 GiB</td><td class="n">&mdash;</td></tr>
+    <tr><td>Expert banks</td><td class="n">host RAM</td><td class="n">~154 GB of 188 GB</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The question changes from <em>does the model fit</em> to <em>how much of it can you keep hot</em>. That is a far better question, because it has a dial on it. Your real constraint is now host RAM: you need enough to hold the expert banks, and 188&#8239;GB comfortably holds ~154&#8239;GB.</p>
+
+<div class="callout">
+  <p><strong>The ten-minute version:</strong> add up your dense (non-expert) weights and divide by your GPU count. If that plus a few GiB of KV and graph headroom fits on one card, you can serve the model regardless of how large the experts are &mdash; provided host RAM holds the experts. For us: 13.5&#8239;GiB &#247; 4 = 3.4&#8239;GiB per card against 22.5&#8239;GiB usable. Comfortable.</p>
+</div>
+
+<h2 id="engine">The engine, and why not vLLM</h2>
+
+<div class="nope">
+  <span class="lbl">What didn&rsquo;t work</span>
+  <p>Four engines, before the one that worked.</p>
+  <ul>
+    <li><strong>Every general-purpose engine we would reach for first.</strong> vLLM has no expert-aware offload yet, SGLang none at all, llama.cpp wants GGUF, KTransformers wants Intel AMX.</li>
+    <li><strong>Released FreeToken 0.1.2.</strong> Even the engine built for this refuses: <code>TP &gt; 1 is not supported for this expert format</code>.</li>
+  </ul>
+</div>
+
+<p>We served this with <a href="https://github.com/FlashML-org/FreeToken">FreeToken</a>, which is not the obvious choice. The obvious choice is vLLM. Here is why it was not.</p>
+
+<h3>What the expert cache actually does</h3>
+
+<p>FreeToken's <code>offload</code> backend keeps the expert banks &mdash; about 154&#8239;GB &mdash; in pinned host RAM and reserves a fixed number of <em>expert slots</em> in VRAM &mdash; not layers, not experts, slots. Each decode step, the router picks its top_k&nbsp;8 experts per layer, the cache remaps those expert ids onto slots, and only the misses are fetched across PCIe:</p>
+
+<p class="where w-src">FreeToken source &mdash; reference, not something you run</p>
+<pre><code>cache.ensure_experts(self.layer_id, topk_ids)  <u># in-place expert-id -&gt; slot</u>
+cache.copy_missing()                           <b># only the misses cross PCIe</b>
+return self._expert_gemm(cache, hidden_states, topk_weights, topk_ids,
+                         views=cache.bank_views(), ...)</code></pre>
+
+<figure style="margin:0">
+<svg class="dg" viewBox="0 0 700 236" role="img" aria-label="One decode step: the router picks 8 of 256 experts per layer; hits are already in the VRAM slot cache, misses are fetched from host RAM over PCIe.">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"></path>
+    </marker>
+  </defs>
+
+  <rect class="dg-box" x="18" y="6" width="664" height="34" rx="3"></rect>
+  <text class="dg-t" x="350" y="21" text-anchor="middle">Router &mdash; replicated, so every rank picks the same experts</text>
+  <text class="dg-s" x="350" y="34" text-anchor="middle">top_k 8 of 256, once per layer, 43 layers = 344 lookups per token</text>
+
+  <rect class="dg-box" x="18" y="76" width="196" height="84" rx="3"></rect>
+  <text class="dg-t" x="116" y="100" text-anchor="middle">Host RAM</text>
+  <text class="dg-s" x="116" y="119" text-anchor="middle">expert banks ~154 GB</text>
+  <text class="dg-s" x="116" y="134" text-anchor="middle">11,008 experts, pinned</text>
+  <text class="dg-s" x="116" y="149" text-anchor="middle">TP-sharded per rank</text>
+
+  <rect class="dg-box-hi" x="272" y="76" width="196" height="84" rx="3"></rect>
+  <text class="dg-t" x="370" y="100" text-anchor="middle">VRAM slot cache</text>
+  <text class="dg-s" x="370" y="119" text-anchor="middle">4080 slots, LRU</text>
+  <text class="dg-s" x="370" y="134" text-anchor="middle">~37% resident</text>
+  <text class="dg-s" x="370" y="149" text-anchor="middle">8&ndash;18% decode hit rate</text>
+
+  <rect class="dg-box" x="526" y="76" width="156" height="84" rx="3"></rect>
+  <text class="dg-t" x="604" y="107" text-anchor="middle">FP4 expert</text>
+  <text class="dg-t" x="604" y="124" text-anchor="middle">GEMM</text>
+  <text class="dg-s" x="604" y="143" text-anchor="middle">on the GPU</text>
+
+  <path class="dg-a" d="M 214 118 L 266 118" marker-end="url(#ah)"></path>
+  <text class="dg-lbl" x="240" y="107" text-anchor="middle">PCIe</text>
+  <text class="dg-cap" x="240" y="136" text-anchor="middle">misses</text>
+  <text class="dg-cap" x="240" y="148" text-anchor="middle">only</text>
+
+  <path class="dg-a" d="M 468 118 L 520 118" marker-end="url(#ah)"></path>
+  <text class="dg-cap" x="494" y="107" text-anchor="middle">hits:</text>
+  <text class="dg-cap" x="494" y="136" text-anchor="middle">no transfer</text>
+
+  <rect class="dg-box" x="18" y="184" width="664" height="44" rx="3"></rect>
+  <text class="dg-s" x="350" y="202" text-anchor="middle">Per token, per rank: 344 lookups &#215; ~3.5 MB per expert slice = ~1.2 GB if every one missed</text>
+  <text class="dg-s" x="350" y="218" text-anchor="middle">At a 13% hit rate that is ~1.05 GB across PCIe, for every single token</text>
+</svg>
+<figcaption>One decode step. The expert banks never move; only the misses do.</figcaption>
+</figure>
+
+<p>Eviction is LRU. The cache is <strong>global, not per-layer</strong>: 4080 slots shared across all 43 layers, against 11,008 layer-expert pairs in total (43 &#215; 256), so about 37% of the model's experts can be resident at once &mdash; roughly 95 per layer on average, though the LRU is free to spend them unevenly. The <code>num_experts</code> minimum the engine enforces is a global floor of one layer's worth, not a per-layer guarantee. Two things follow from that design, and both matter more than the slot count:</p>
+
+<ul>
+  <li><strong>Prefill and decode take different paths.</strong> Above a crossover of <code>T &#215; top_k &ge; num_experts</code>, prefill switches from on-demand slot fetches to streaming whole expert layers, because past that point a chunk touches most of the layer anyway. Step 7 covers what happens when that second path is broken.</li>
+  <li><strong>Residency is not hit rate.</strong> We did not measure our own hit rate &mdash; this figure is borrowed. FreeToken's issue tracker reports LRU realising roughly <strong>8&ndash;18% decode hit rate</strong> on DSV4's fine-grained MoE &mdash; 256 small experts per layer scatter far worse than the 8&ndash;16 large experts of a Mixtral-style model. Holding 37% of the experts does not mean hitting 37% of the time.</li>
+</ul>
+
+<p>If it holds here, that &mdash; not the GPU count &mdash; is what sets our 20&#8239;tok/s ceiling, because every miss is a PCIe round trip on a box with no NVLink. Measuring it on your own workload is the first thing worth doing.</p>
+
+<h3>The arithmetic that explains 20 tok/s</h3>
+
+<p>That last figure is worth carrying through, because it decides whether this approach suits your hardware. The chain is short, and every input is either measured or stated:</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Step</th><th>Working</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr><td>One expert, all ranks</td><td class="f">154 GB &#247; (43 &#215; 256)</td><td class="n">14.0 MB</td></tr>
+    <tr><td>One expert, this rank</td><td class="f">&#247; 4 (TP-sharded)</td><td class="n">3.5 MB</td></tr>
+    <tr><td>Lookups per token</td><td class="f">43 layers &#215; top_k 8</td><td class="n">344</td></tr>
+    <tr><td>If every one missed</td><td class="f">344 &#215; 3.5 MB</td><td class="n">1.20 GB</td></tr>
+    <tr><td>At a 13% hit rate</td><td class="f">&#215; 0.87</td><td class="n">1.05 GB</td></tr>
+    <tr><td>Over PCIe Gen4 &#215;16</td><td class="f">&#247; ~25 GB/s effective</td><td class="n">42 ms</td></tr>
+    <tr><td><strong>Predicted</strong></td><td class="f">1000 &#247; 42</td><td class="n"><strong>~24 tok/s</strong></td></tr>
+    <tr><td><strong>Measured</strong></td><td class="f">226 tokens, timed client-side</td><td class="n"><strong>20.37 tok/s</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Across the whole 8&ndash;18% hit-rate range the prediction lands between 22.6 and 25.3&#8239;tok/s, against 20.37 measured &mdash; so expert traffic accounts for roughly <strong>85% of the per-token time budget</strong>. That is the claim "the limiter is PCIe, not compute" made checkable instead of asserted.</p>
+
+<p>It also tells you how to shop. Doubling the GPU count buys nothing here; halving the bytes per miss, or raising the hit rate, buys almost everything. An NVLink box, or one with enough VRAM to hold a larger slice of the experts, moves this number. A faster GPU does not.</p>
+
+<div class="callout warn">
+  <p><strong>Assumptions, since two of these are not measured.</strong> The 8&ndash;18% hit rate is borrowed from FreeToken's issue tracker, not observed on our run. The ~25&#8239;GB/s is a reasonable effective figure for PCIe Gen4 &#215;16; we did not confirm the link width, generation, or whether the four cards contend for one root complex. Treat this as an order-of-magnitude argument that happens to agree with the measurement, not as a second measurement.</p>
+</div>
+
+<h3>Why not vLLM, llama.cpp or KTransformers</h3>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Engine</th><th>Expert offload today</th><th>Why not here</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>vLLM</strong></td>
+      <td><code>--cpu-offload-gb</code> is generic layer-wise offload, not expert-aware. Routing-driven expert cache with LFRU eviction is <a href="https://github.com/vllm-project/vllm/issues/38256">RFC #38256</a>, still open</td>
+      <td>PR 1 of 3 is unmerged and requires <code>--enforce-eager</code>, so no CUDA graphs; PRs 2&ndash;3 unimplemented. No DSV4 architecture support</td>
+    </tr>
+    <tr>
+      <td><strong>SGLang</strong></td>
+      <td>No native expert offload; <a href="https://github.com/sgl-project/sglang/issues/11425">tracked as a KTransformers-integration request</a></td>
+      <td>Same architecture gap</td>
+    </tr>
+    <tr>
+      <td><strong>llama.cpp</strong></td>
+      <td>Real and shipping &mdash; <code>--n-cpu-moe</code> puts expert tensors in system RAM</td>
+      <td>GGUF only, so the FP4 checkpoint would need converting; tensor parallelism across 4 cards is not its strength</td>
+    </tr>
+    <tr>
+      <td><strong>KTransformers</strong></td>
+      <td>Purpose-built for this, with AMX/AVX-512 CPU expert kernels</td>
+      <td>Its advantage is CPU-side compute on Intel AMX hardware; ours is a rented Kaggle box, and multi-GPU TP is not its main path</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>The decisive reason is narrower than any of those rows, though: <strong>architecture support</strong>. DeepSeek-V4-Flash is not a Mixtral clone. It needs MLA latent-KV attention, a Lightning Indexer, sparse attention, a sliding-window radix KV cache on 128-token window pages, and FP4 experts packed as <code>I8</code> with <code>F8_E8M0</code> scales. FreeToken ships a DSV4-specific attention backend (<code>dsv4_sparse</code>), KV pool and cost model. A generic engine would need all of that written first, and expert offload on top.</p>
+
+<div class="callout warn">
+  <p><strong>This is a selection rationale, not a benchmark.</strong> We did not run vLLM, llama.cpp or KTransformers on this checkpoint &mdash; in most cases we could not have, which is the point. Treat the table as "why we started here", and expect the vLLM row to age quickly once #38256 lands.</p>
+</div>
+
+<h2 id="step1">Step 1: Getting the model onto the machine</h2>
+
+<div class="nope">
+  <span class="lbl">What didn&rsquo;t work</span>
+  <ul>
+    <li><strong>Resolving the wheel closure on macOS.</strong> pip evaluated the Linux markers against the laptop and produced a complete, wrong wheel set with no error.</li>
+    <li><strong>Forcing it with <code>--platform</code> + <code>--only-binary=:all:</code>.</strong> Aborted on one tag mismatch &mdash; most CUDA wheels are <code>manylinux_2_17</code>, <code>nvidia-cuda-cupti</code> is <code>manylinux_2_25</code>.</li>
+    <li><strong>Docker under <code>linux/amd64</code> emulation.</strong> Ten minutes, zero bytes downloaded.</li>
+    <li><strong>Shipping the wheels as a Kaggle dataset.</strong> Kaggle strips <code>+</code> from filenames, so <code>0.1.2+gfb7f732de</code> arrived unparseable and pip refused it.</li>
+  </ul>
+</div>
+
+<p>The GPUs are sorted. Now the 156&#8239;GiB of weights and every wheel the engine needs have to reach a box with no network.</p>
+
+<h3>Check your disk and your network</h3>
+
+<p>Before anything else, confirm what you are reading the weights across. A 156&#8239;GiB checkpoint over a slow mount sets your load time floor no matter how fast the GPUs are.</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; dsv4-tp4</p>
+<pre><code><span class="p">$</span> nvidia-smi --query-gpu=index,name,memory.total,compute_cap --format=csv
+index, name, memory.total [MiB], compute_cap
+0, NVIDIA L4, 23034 MiB, 8.9
+1, NVIDIA L4, 23034 MiB, 8.9
+2, NVIDIA L4, 23034 MiB, 8.9
+3, NVIDIA L4, 23034 MiB, 8.9
+
+<span class="p">$</span> du -sh "$CKPT"
+156G
+
+<span class="p">$</span> mount | grep kaggle/input
+192.168.7.2:/... on /kaggle/input type <b>nfs</b> (ro,hard,nolock,rsize=524288,timeo=600)</code></pre>
+
+<p>We measured that mount at roughly 130&#8239;MB/s on a single stream and 830&#8239;MB/s across eight parallel streams. That gap matters later: it is the difference between a serial and a parallel expert load.</p>
+
+<h3>What you actually get</h3>
+
+<p>Read the safetensors headers rather than trusting the model card. For this checkpoint each shard carries 768 expert tensors &mdash; 256 experts &#215; three matrices (w1, w2, w3) &mdash; and the experts account for about 3.22&#8239;GB per layer:</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Part</th><th>Format</th><th>Size</th></tr></thead>
+  <tbody>
+    <tr><td>Whole checkpoint on disk</td><td class="f">48 safetensors shards</td><td class="n">156 GiB (167 GB)</td></tr>
+    <tr><td>Routed expert banks, loaded to host RAM</td><td class="f">FP4 in I8 + F8_E8M0 scales</td><td class="n">~154 GB</td></tr>
+    <tr><td>Dense / attention / shared, resident on GPU</td><td class="f">FP8</td><td class="n">3.38 GiB &#215; 4 ranks</td></tr>
+    <tr><td><strong>Those two, added up</strong></td><td class="f">154 + 14.5</td><td class="n"><strong>~168 GB &mdash; the checkpoint</strong></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Those are measured, not derived &mdash; <code>du</code> for the first, the serve log for the other two. The split is the whole story. The two loaded parts account for the whole checkpoint within rounding, which is the check worth doing on any figure like this: <strong>about 92% of this model is routed experts</strong>, and routed experts are exactly the part that does not need to be on a GPU.</p>
+
+<h3>Staging an offline install</h3>
+
+<p>An air-gapped target changes one thing: you resolve dependencies on one machine and install them on another. Everything below follows from that split, and none of it is Kaggle-specific &mdash; the same applies to an offline cluster node or a locked-down CI runner.</p>
+
+<p>The pattern is two environments: one has a network and does nothing but resolve and download (<code>pip download -d ./wheels</code>), the other has the GPUs and installs from that directory with the index switched off (<code>pip install --no-index --find-links ./wheels</code>).</p>
+
+<p>On Kaggle that is a CPU notebook with internet writing into <code>/kaggle/working</code>, attached to the GPU notebook through <code>kernel_sources</code>. Elsewhere it is a build host and an artifact store. The mechanism differs; the rule does not.</p>
+
+<h4>Resolve on the platform you will install on</h4>
+
+<p>This is the part that catches people, and it is worth stating as a rule: <strong><code>pip download</code> resolves against the machine running it, not the machine you are targeting.</strong> Python version, OS, architecture and libc version all feed into which wheel gets selected, and environment markers such as <code>platform_system == "Linux"</code> or <code>sys_platform == "linux"</code> are evaluated against the host. Resolve on a mismatched machine and you get a complete, self-consistent, entirely wrong set of wheels &mdash; and no error, because nothing failed.</p>
+
+<p>pip does offer <code>--platform</code>, <code>--python-version</code>, <code>--implementation</code> and <code>--abi</code> to override this, but they come with a catch: they require <code>--only-binary=:all:</code>, and you must name a platform tag that every package in the closure actually publishes. We tried it, and the run aborted on a single mismatch &mdash; most CUDA wheels were <code>manylinux_2_17</code>, but <code>nvidia-cuda-cupti</code> ships <code>manylinux_2_25</code>. One wrong tag fails the whole batch.</p>
+
+<p>The reliable answer is to resolve somewhere that matches the target: a container of the same base image, a CI runner on the same OS, or in our case simply a second notebook on the same platform as the GPU box. That took one run and produced 105 wheels, 3.49&#8239;GB.</p>
+
+<div class="callout">
+  <p><strong>If you are on macOS</strong> &mdash; or Windows, or an ARM laptop targeting x86 &mdash; do not resolve locally, and do not reach for emulation as the fix. Running the download under <code>--platform linux/amd64</code> in Docker on Apple silicon fetched nothing in ten minutes before we gave up. Use a native machine that matches the target.</p>
+</div>
+
+<h4>Then two CUDA-specific traps</h4>
+
+<ul>
+  <li><strong>Pin the compiler toolchain to one version.</strong> nvcc, crt and nvvm come from separate wheels and pip will happily mix them. Mix 13.0 and 13.4 and the runtime kernel build dies with <code>ptxas: Unsupported .version 9.4; current version is 9.0</code>. We aligned those three at 13.4.59. <code>nvidia-cuda-cccl</code> is headers only and publishes no matching 13.4 build, so it stays at 13.0.85 &mdash; it contributes no PTX and does not participate in the version skew.</li>
+  <li><strong>Create the unversioned sonames.</strong> NVIDIA wheels ship only <code>libcudart.so.13</code>. Anything that compiles at runtime links <code>-lcudart</code> and the linker wants a bare <code>libcudart.so</code>, so symlink them in place before the first build. The same applies to <code>lib</code> vs <code>lib64</code> directory names.</li>
+</ul>
+
+<div class="callout warn">
+  <p><strong>Kaggle strips <code>+</code> from dataset filenames.</strong> A PEP 440 local version like <code>0.1.2+gfb7f732de</code> becomes the unparseable <code>0.1.2gfb7f732de</code> and pip refuses it. Notebook output attached via <code>kernel_sources</code> preserves the character; a dataset does not. Use the former.</p>
+</div>
+
+<h4>The two build notebooks</h4>
+
+<p>Everything above is the principle. Here is the actual shape of the two notebooks the serve notebook attaches, because without them nothing reproduces. Build them in this order &mdash; each must finish successfully before the next can attach its output.</p>
+
+<h4>Notebook A &mdash; resolve the wheels (<code>ft-wheels</code>)</h4>
+
+<p>CPU, internet on, no competition attached. That last part is not optional: the moment you add <code>competition_sources</code> you lose the network, which is the whole reason this is a separate notebook.</p>
+
+<p class="where w-file">File on your machine &mdash; ft-wheels/kernel-metadata.json</p>
+<pre><code><u># ft-wheels/kernel-metadata.json</u>
+{
+  "id": "&lt;owner&gt;/ft-wheels",
+  "code_file": "wheels.ipynb",
+  "kernel_type": "notebook",
+  "enable_gpu": "false",
+  "enable_internet": "true",   <b>&lt;- possible only with NO competition_sources</b>
+  "competition_sources": []
+}</code></pre>
+
+<p>The notebook fetches the engine's nightly manifest, verifies both wheels against the checksums it publishes, then resolves the whole dependency closure beside them:</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; ft-wheels</p>
+<pre><code>import os, json, hashlib, subprocess
+W = "/kaggle/working/wheels"; os.makedirs(W, exist_ok=True)
+ENG = json.loads(subprocess.run(
+    "curl -sL https://github.com/FlashML-org/FreeToken/releases"
+    "/download/nightly/engine-linux_x86_64.json",
+    shell=True, capture_output=True, text=True).stdout)
+
+staged = {}
+for key in ("runtime", "kernel_cache"):
+    a = ENG[key]; dst = os.path.join(W, a["name"])
+    subprocess.run(f'curl -sL -o "{dst}" "{a["url"]}"', shell=True, check=True)
+    <b>assert hashlib.sha256(open(dst,"rb").read()).hexdigest() == a["sha256"]</b>
+    staged[key] = dst
+
+subprocess.run(["pip", "download", "-d", W, staged["runtime"], staged["kernel_cache"],
+                <u># pin the CUDA toolchain to ONE version -- see the trap above</u>
+                "nvidia-cuda-nvcc==13.4.59", "nvidia-cuda-crt==13.4.59",
+                "nvidia-nvvm==13.4.59",      "nvidia-cuda-cccl==13.0.85"])</code></pre>
+
+<p>Output: 105 wheels, 3.49&#8239;GB in <code>/kaggle/working/wheels</code>. The prebuilt kernel cache is the reason this works at all on a box with no CUDA toolkit &mdash; it ships cu130 kernels already compiled for sm_89 among its 88 <code>.so</code> files, so nothing has to be built for the GPU at serve time.</p>
+
+<h4>Notebook B &mdash; build the patched engine (<code>ft-pr70</code>)</h4>
+
+<p>PR #70 is not released, so there is no wheel to download. You build one. Same metadata as above &mdash; internet on, no competition &mdash; with <code>code_file</code> pointing at this notebook instead.</p>
+
+<p>Clone at the exact commit rather than the branch head, so your build is reproducible:</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; ft-pr70</p>
+<pre><code>import os, re, glob, subprocess
+SRC, OUT = "/kaggle/working/src", "/kaggle/working/pr70"
+SHA = "c066b38e1c9981c8c8adb0efb328049fe87aa8c0"   <u># PR #70</u>
+os.makedirs(OUT, exist_ok=True)
+subprocess.run(["git","clone","-q","https://github.com/FlashML-org/FreeToken",SRC], check=True)
+subprocess.run(["git","fetch","-q","origin","pull/70/head"], cwd=SRC, check=True)
+subprocess.run(["git","checkout","-q",SHA], cwd=SRC, check=True)</code></pre>
+
+<p>Two things make the build succeed that are not obvious:</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; ft-pr70</p>
+<pre><code><u># 1. The build hardcodes -L&lt;wheel&gt;/lib and -L&lt;wheel&gt;/lib64 and links -lcudart,</u>
+<u>#    but NVIDIA wheels ship only versioned sonames. Create the bare names in place.</u>
+<u>#    You need this again in Step 3, so make it a function.</u>
+<b>def link_sonames(DP):</b>
+    for so in glob.glob(DP + "/nvidia/**/lib*/lib*.so.*", recursive=True):
+        base = re.sub(r"\.so\.\d+.*$", ".so", so)
+        if not os.path.exists(base):
+            try: os.symlink(so, base)
+            except OSError: pass
+    for d in glob.glob(DP + "/nvidia/*/lib"):              <u># and lib -&gt; lib64</u>
+        l64 = os.path.join(os.path.dirname(d), "lib64")
+        if not os.path.exists(l64): os.symlink(d, l64)
+
+link_sonames("/usr/local/lib/python3.12/dist-packages")
+
+<u># 2. Call the PEP 517 backend directly. `pip wheel` swallows the compiler error</u>
+<u>#    and reports only "failed building wheel", which tells you nothing.</u>
+<b>os.chdir(SRC)</b>   <u># build_wheel builds the CWD; !cd in a cell does not change it</u>
+from setuptools import build_meta as bm
+whl = bm.build_wheel(<b>OUT</b>)      <u># arg is the OUTPUT dir -> /kaggle/working/pr70/*.whl</u></code></pre>
+
+<p>That second point saved more time than anything else in this post. Running the backend by hand turns an opaque pip failure into the actual <code>ld</code> or <code>nvcc</code> message, which is how the missing sonames were found in the first place.</p>
+
+<p class="where w-out">Output &mdash; ft-pr70</p>
+<pre><code>created 31 unversioned .so symlinks
+BUILT: <b>freetoken-0.1.2-cp312-cp312-linux_x86_64.whl</b></code></pre>
+
+<h4>Push them, then wire them up</h4>
+
+<p class="where w-local">Your machine &mdash; shell, in this order</p>
+<pre><code><span class="p">$</span> kaggle kernels push -p ft-wheels    <u># wait for it to finish</u>
+<span class="p">$</span> kaggle kernels push -p ft-pr70      <u># wait for it to finish</u>
+<span class="p">$</span> kaggle kernels push -p dsv4-tp4     <u># attaches both as kernel_sources</u></code></pre>
+
+<p>A kernel's output is only attachable once the run has completed, so the two pushes above are sequential, not parallel. And if you intend anyone else to fork the serve notebook, all three have to be public &mdash; a public notebook whose <code>kernel_sources</code> are private is not reproducible by anybody but you.</p>
+
+<h2 id="step2">Step 2: Pick your split, then check it divides</h2>
+
+<div class="nope">
+  <span class="lbl">What didn&rsquo;t work</span>
+  <ul>
+    <li><strong>Expecting four GPUs to mean four times the context.</strong> The KV pool is replicated per rank, so TP buys none. We planned around a 256K-token pool and the solver settled on 32K.</li>
+    <li><strong>Stock tensor parallelism.</strong> Released FreeToken gates TP&gt;1 for every quantized expert format, so <code>--tensor-parallel-size 4</code> fails before a layer is built.</li>
+  </ul>
+</div>
+
+<p>There are three common ways to cut a model across GPUs, and for a MoE model with offloaded experts the choice is more constrained than usual.</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Split</th><th>How it cuts</th><th>Why we did or didn't</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Tensor</strong></td><td>Every layer sliced across all GPUs</td><td><strong>Used.</strong> Splits both dense weights and expert banks, so no rank stores a full copy</td></tr>
+    <tr><td><strong>Pipeline</strong></td><td>Whole layers assigned to each GPU</td><td>Not supported for this runtime; would also idle 3 of 4 cards at batch size 1</td></tr>
+    <tr><td><strong>Expert</strong></td><td>Experts distributed across GPUs</td><td>Moot once experts live in host RAM</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Now the part that catches people. Released FreeToken 0.1.2 will not do tensor parallelism on this model at all:</p>
+
+<p class="where w-src">FreeToken source &mdash; reference</p>
+<pre><code><u># layers/quantization/moe/base.py:153</u>
+if not tp_ok and cfg.tp_size &gt; 1:
+    return <i>"TP &gt; 1 is not supported for this expert format"</i></code></pre>
+
+<p>Every quantized expert path &mdash; <code>fp8_block</code>, <code>nvfp4</code>, <code>mxfp4</code> &mdash; passes <code>tp_ok=False</code>. Multi-GPU serving of this checkpoint requires <a href="https://github.com/FlashML-org/FreeToken/pull/70">PR&nbsp;#70</a>, which adds a genuinely tensor-parallel DSV4 runtime: rank-sliced weights, rank-local FP4 expert banks, and collectives placed where rank-local partials become complete values.</p>
+
+<h3>What is sharded, and what is not</h3>
+
+<p>PR #70 publishes an ownership table, and you should read it before tuning anything, because one row changes what four GPUs buy you:</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Component</th><th>Layout</th><th>Completion</th></tr></thead>
+  <tbody>
+    <tr><td>Token embedding</td><td>Vocabulary rows</td><td>Masked local lookup, then all-reduce</td></tr>
+    <tr><td>LM head</td><td>Vocabulary rows</td><td>Local logits, then rank-ordered all-gather</td></tr>
+    <tr><td>MLA <code>wq_b</code></td><td>Column-parallel over query heads</td><td>Deterministic head block per rank</td></tr>
+    <tr><td>MLA <code>wo_b</code></td><td>Row-parallel</td><td>One all-reduce completes attention</td></tr>
+    <tr><td>Routed FP4 experts</td><td>Split on <code>moe_inter_dim</code></td><td>Added to shared partial, one MoE all-reduce</td></tr>
+    <tr><td><strong>Latent KV + paged KV pools</strong></td><td><strong>Replicated</strong></td><td>Every local head reads the one latent KV</td></tr>
+    <tr><td>Router, compressors, indexer</td><td>Replicated</td><td>Every rank must choose the same experts</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout">
+  <p><strong>Tensor parallelism does not buy you context here.</strong> The KV pool is replicated, so every rank holds the whole thing and four GPUs give you exactly the context of one. What TP buys is not storing the expert banks four times over. If you came looking for a longer context window, this is not the lever.</p>
+</div>
+
+<h3>Check it divides</h3>
+
+<p>TP=4 is not always legal. PR #70 validates up front and fails with a targeted config error rather than producing wrong math, and your TP size must divide all of:</p>
+
+<ul>
+  <li>attention head count and MLA <code>o_groups</code> &mdash; partial groups are rejected outright</li>
+  <li>the vocabulary</li>
+  <li>the quantized MoE intermediate dimension &mdash; FP8 128&#215;128 blocks and FP4 32-element scale blocks cannot be cut at arbitrary boundaries</li>
+</ul>
+
+<p>For this checkpoint, 1, 2 and 4 all divide cleanly. If your TP size does not, the run stops before any layer is built, which is the behaviour you want.</p>
+
+<h2 id="step3">Step 3: Install it on the offline box</h2>
+
+<div class="nope">
+  <span class="lbl">What didn&rsquo;t work</span>
+  <ul>
+    <li><strong>Replacing <code>LD_LIBRARY_PATH</code> instead of appending to it.</strong> The TP rank workers inherit this environment, and the driver's <code>libcuda.so.1</code> lives on the system path. Clobbering it gave us <code>RuntimeError: cannot use CUDA device 3: only 0 device(s) visible</code>.</li>
+    <li><strong>Leaving the NVIDIA wheels' <code>libcuda.so</code> stub in place.</strong> It shadows the real driver library. Delete it.</li>
+    <li><strong>Assuming the install is done when pip exits 0.</strong> Two of the packages it installs cannot run on this box at all &mdash; see below.</li>
+  </ul>
+</div>
+
+<p>The box has no network, four mounts, and nothing installed. This step is the whole bridge between them, and it has five parts that all have to happen before <code>ft serve</code> will start.</p>
+
+<h3>Find the mounts</h3>
+
+<p>Do not hardcode these paths. One <code>kernel_sources</code> entry mounts at <code>/kaggle/input/&lt;kernel&gt;/</code>, two or more at <code>/kaggle/input/notebooks/&lt;owner&gt;/&lt;kernel&gt;/</code>, so glob for whichever you got:</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; dsv4-tp4</p>
+<pre><code>import glob, os, re
+FL   = next(iter(glob.glob("/kaggle/input/**/ft-wheels/wheels", recursive=True)), None)
+PR   = glob.glob("/kaggle/input/**/ft-pr70/pr70/freetoken-*.whl", recursive=True)
+PR_WHEEL = PR[0] if PR else None
+CKPT = os.path.dirname(sorted(
+    glob.glob("/kaggle/input/models/**/config.json", recursive=True), key=len)[0])
+assert FL and PR_WHEEL, "build-notebook output not mounted"
+print(FL, PR_WHEEL, CKPT, sep="\n")</code></pre>
+
+<h3>Install from the local wheel directory</h3>
+
+<p>Kaggle's image is Python 3.12, so everything staged in Notebook A is <code>cp312</code>. <code>--no-index</code> is what guarantees you are installing what you staged and not silently reaching for a network that is not there:</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; dsv4-tp4 (shell magic, runs on the GPU box)</p>
+<pre><code><span class="p">!</span>pip install <b>--no-index</b> --find-links {FL} {PR_WHEEL} \
+      nvidia-cuda-nvcc==13.4.59 nvidia-cuda-crt==13.4.59 \
+      nvidia-nvvm==13.4.59      nvidia-cuda-cccl==13.0.85</code></pre>
+
+<h3>Remove the native packages that cannot run here</h3>
+
+<p>This is the step that is easy to skip and costs a whole run. Both packages install cleanly and neither works on this hardware, and because FreeToken probes for them with <code>find_spec</code>, their mere presence routes the model down a code path that dies mid-forward. Make "broken" mean "absent":</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; dsv4-tp4</p>
+<pre><code>import importlib, importlib.util, subprocess, sys
+FORCE_DROP = {"flashinfer"}          <u># imports fine; its JIT cannot compile here</u>
+for mod, dist in (("sgl_kernel","sglang-kernel"), ("flashinfer","flashinfer-python")):
+    try:
+        if mod in FORCE_DROP: raise RuntimeError("runtime JIT unusable on this box")
+        importlib.import_module(mod)
+    except BaseException:
+        subprocess.run([sys.executable,"-m","pip","uninstall","-y",dist])
+        importlib.invalidate_caches()
+        <b>assert importlib.util.find_spec(mod) is None</b>   <u># or freetoken still takes the fused path</u></code></pre>
+
+<h3>Put the CUDA toolchain on PATH</h3>
+
+<p>TP&gt;1 compiles one kernel at runtime (<code>pynccl.cu</code>), so nvcc has to be findable even though nothing else is built here:</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; dsv4-tp4</p>
+<pre><code>DP   = "/usr/local/lib/python3.12/dist-packages"
+NVCC = sorted(glob.glob(DP + "/nvidia/**/bin/nvcc", recursive=True))[0]
+os.environ["PATH"] = os.path.dirname(NVCC) + ":" + os.environ["PATH"]
+os.environ["CUDA_HOME"] = os.path.dirname(os.path.dirname(NVCC))
+
+<b>link_sonames(DP)</b>   <u># same helper as Notebook B -- the linker wants bare .so names</u>
+
+libdirs = sorted({os.path.dirname(x) for x in
+                  glob.glob(DP + "/nvidia/**/lib*/lib*.so", recursive=True)})
+os.environ["LIBRARY_PATH"] = ":".join(libdirs) + ":" + os.environ.get("LIBRARY_PATH","")
+<b># APPEND -- never clobber. Rank workers inherit this, and libcuda.so.1 is a system lib.</b>
+os.environ["LD_LIBRARY_PATH"] = ":".join(
+    [os.environ.get("LD_LIBRARY_PATH",""), "/usr/lib/x86_64-linux-gnu", *libdirs]).strip(":")
+
+for stub in glob.glob(DP + "/nvidia/**/libcuda.so", recursive=True):
+    if os.path.islink(stub): os.remove(stub)    <u># do not shadow the real driver</u>
+
+import torch; <b>assert torch.cuda.device_count() == 4</b></code></pre>
+
+<h3>Apply the sm_89 patch</h3>
+
+<p>If you are on an Ada card (L4, RTX 40-series) with torch&nbsp;&lt;&nbsp;2.12, do this or long prompts hang forever &mdash; Step 7 explains why. PR #70's tree predates the fix, so <a href="https://github.com/FlashML-org/FreeToken/pull/243/files">PR #243</a> touches exactly one file, and it is self-contained &mdash; so the cheapest route is to check that file out from the PR inside Notebook B (where the tree already exists), ship it alongside the wheel, and copy it over the installed copy after pip finishes. Do not take <code>main</code>'s version of the file: it has drifted past #243 and drops imports PR #70 still uses.</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; dsv4-tp4</p>
+<pre><code><u># In Notebook B, where the PR #70 tree already exists, produce the patched file:</u>
+FILE = "python/freetoken/kernel/triton/fp8_pertensor_linear.py"
+subprocess.run(["git","fetch","-q","origin","pull/243/head:pr243"], cwd=SRC, check=True)
+<u># PR #243 touches only this one file, so take its post-merge version of it and</u>
+<u># re-apply just that file's diff onto the PR #70 checkout:</u>
+subprocess.run(["git","checkout","pr243","--",FILE], cwd=SRC, check=True)
+<u># copy SRC/FILE into the ft-pr70 notebook output alongside the wheel</u>
+
+<u># Then in the serve notebook, after pip install:</u>
+import py_compile, shutil
+DST = DP + "/freetoken/kernel/triton/fp8_pertensor_linear.py"
+assert "rowwise_scaled_mm_ok" not in open(DST).read(), "already patched"
+shutil.copy(PATCHED_FILE_FROM_MOUNT, DST)
+py_compile.compile(DST, doraise=True)
+<b>from freetoken.kernel.triton.fp8_pertensor_linear import rowwise_scaled_mm_ok</b>
+print("row-wise enabled:", rowwise_scaled_mm_ok())   <u># must print False on sm_89 + torch&lt;2.12</u></code></pre>
+
+<p>Patched, <code>rowwise_scaled_mm_ok()</code> returns False on sm_89 with torch&nbsp;&lt;&nbsp;2.12 and the fused projection runs one tensor-wise GEMM per part instead. On torch&nbsp;&ge;&nbsp;2.12 it is a no-op, so it is safe to apply unconditionally.</p>
+
+<h2 id="step4">Step 4: The command, and every flag in it</h2>
+
+<div class="nope">
+  <span class="lbl">What didn&rsquo;t work</span>
+  <ul>
+    <li><strong><code>--num-tokens</code>, at four different values.</strong> Each one bypassed the fit solver rather than constraining it, so the whole ladder measured nothing.</li>
+    <li><strong><code>--moe-cache-size 128</code>.</strong> Below <code>num_experts</code> (256); rejected instantly.</li>
+    <li><strong><code>--moe-cache-size 256</code>.</strong> Passes that check, then fails a second one &mdash; prefill overlap needs <code>2 &#215; num_experts</code>.</li>
+    <li><strong><code>--moe-backend hybrid</code>.</strong> Chosen off a benchmark measured at TP=1 on the released engine, which told us nothing about TP=4 on a patched branch.</li>
+  </ul>
+</div>
+
+<p>Here is the launch command that works, in full:</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; dsv4-tp4 (runs on the GPU box, not your laptop)</p>
+<pre><code><span class="p">!</span>ft serve \
+    --model-path {CKPT} \                <u># resolved in Step 3; never hardcode it</u>
+    --gpu 0,1,2,3 \
+    --tensor-parallel-size 4 \
+    --moe-backend offload \
+    --expert-load serial \
+    --memory-ratio 0.90 \
+    --decode-log-interval 1</code></pre>
+
+<p>Seven flags. Note what is <em>not</em> there &mdash; no context length, no cache size, no page count. That omission is deliberate and is covered below.</p>
+
+<h3>Every flag, explained</h3>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Flag</th><th>What it does</th><th>Why this value</th></tr></thead>
+  <tbody>
+    <tr><td class="f">--model-path</td><td>Local folder or HF repo id</td><td>The NFS mount; also accepts <code>--model</code></td></tr>
+    <tr><td class="f">--gpu 0,1,2,3</td><td>One entry per TP rank; entry <em>i</em> is rank <em>i</em>. Accepts indices or GPU UUIDs</td><td>Must have exactly as many entries as the TP size or it errors at parse</td></tr>
+    <tr><td class="f">--tensor-parallel-size 4</td><td>TP degree; alias <code>--tp-size</code></td><td>All four cards. Must divide heads, vocab, <code>o_groups</code>, MoE inner dim</td></tr>
+    <tr><td class="f">--moe-backend offload</td><td><code>auto</code>&#8239;/&#8239;<code>fused</code>&#8239;/&#8239;<code>offload</code>&#8239;/&#8239;<code>cpu</code>&#8239;/&#8239;<code>hybrid</code></td><td><code>fused</code> keeps experts resident and will not fit. <code>offload</code> streams them from host RAM</td></tr>
+    <tr><td class="f">--expert-load serial</td><td><code>auto</code>&#8239;/&#8239;<code>serial</code>&#8239;/&#8239;<code>parallel</code> host-RAM read strategy</td><td><code>parallel</code> is faster but needs a whole-shard buffer on top of the banks. <code>serial</code> is the low-memory read</td></tr>
+    <tr><td class="f">--memory-ratio 0.90</td><td>Fraction of free VRAM the engine may use for weights + MoE cache + KV combined</td><td>The remaining 10% is CUDA-graph and activation headroom</td></tr>
+    <tr><td class="f">--decode-log-interval 1</td><td>Print a scheduler line every N decode forwards</td><td>1 while tuning; raise it in production</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Three more you will reach for, and one you should know exists:</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Flag</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td class="f">--moe-cache-size N</td><td>Explicit GPU expert-slot count. <strong>Minimum is <code>num_experts</code> (256 here)</strong>, and if prefill overlap is on the real minimum is <code>2 &#215; num_experts</code> = 512</td></tr>
+    <tr><td class="f">--moe-cache-auto</td><td>Solves slot count <em>and</em> KV pages from one budget. The default when you pass an offload backend with no sizing flag</td></tr>
+    <tr><td class="f">--kv-reserve-tokens N</td><td>KV floor reserved before auto fills experts. Only has effect under <code>--moe-cache-auto</code></td></tr>
+    <tr><td class="f">--expert-prefetch 1</td><td>Shards queued ahead by the <em>parallel</em> loader &mdash; inert under <code>--expert-load serial</code>. Drop to 1 if you switch to parallel loading and host RAM is tight</td></tr>
+    <tr><td class="f">--port 1919</td><td>Where the OpenAI-compatible API listens. Default 1919; <code>--host</code> to bind elsewhere</td></tr>
+    <tr><td class="f">--cuda-graph-max-bs N</td><td>Largest batch size captured as a CUDA graph. Lower it if capture OOMs; <code>1</code> is the minimal-graph setting</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>The flag not to pass</h3>
+
+<p>This one cost us three runs, so it gets its own section: <strong>do not pass <code>--num-tokens</code> or <code>--num-pages</code>.</strong></p>
+
+<p>It reads like a constraint. It behaves like an override:</p>
+
+<p class="where w-src">FreeToken source &mdash; reference</p>
+<pre><code><u># kvcache/dsv4_paged_pool.py:343</u>
+num_pages = config.num_page_override
+if num_pages is None:
+    sizes = dsv4_solve_num_pages(<b>available_memory</b>, ...)   <u># fit-checked</u>
+else:
+    floor = _dsv4_window_floor_pages(config, P)
+    if num_pages &lt; floor: raise ...                      <u># ONLY a lower bound</u>
+    sizes = _dsv4_pool_sizes(config, num_pages + 1)      <i># never consults memory</i></code></pre>
+
+<p>Pass it and the solver is skipped entirely. The engine validates a floor, then allocates the pool you asked for whether or not it fits, and you get an out-of-memory error deep inside buffer allocation. Leave it off and the solver sizes the pool against actual free memory, every time.</p>
+
+<p>It gets worse in combination. Selecting <code>--moe-backend offload</code> with no cache-sizing flag silently switches on <code>moe_cache_auto</code>:</p>
+
+<p class="where w-src">FreeToken source &mdash; paraphrased, see server/args.py</p>
+<pre><code><u># server/args.py:700, condensed</u>
+if is_offload_moe_backend(kwargs["moe_backend"]) and _no_cache_flag:
+    kwargs["moe_cache_auto"] = True        <b># you did not ask for this</b></code></pre>
+
+<p>Auto plans expert slots and KV pages against a single shared budget. But the engine only writes back auto's KV half if you have not set an override &mdash; so with <code>--num-tokens</code> present, the experts keep their greedy share and the KV pool allocates its pinned size against bytes that are already spent. Two sane behaviours composing into a double-spend.</p>
+
+<h2 id="step5">Step 5: How to read the startup log</h2>
+
+<div class="nope">
+  <span class="lbl">What didn&rsquo;t work</span>
+  <ul>
+    <li><strong>Treating HTTP 200 from <code>/health</code> as ready.</strong> That endpoint is always 200 &mdash; the JSON <code>status</code> field is the gate, moving <code>loading &rarr; ok &rarr; error</code>. Polling for 200 gave us a "ready in 10s" on a 167&#8239;GB model, and one result we had to retract.</li>
+    <li><strong><code>terminate()</code> on the server process.</strong> It leaves the TP rank workers alive, and the next health check gets answered by the previous run. Kill the process group.</li>
+  </ul>
+</div>
+
+<h3>Launch it and wait for the right signal</h3>
+
+<p><code>ft serve</code> never exits, so do not run it with a blocking call and a timeout &mdash; start it and poll. It listens on <strong>port 1919</strong> by default (<code>--port</code> to change it), and the readiness signal is <em>not</em> the HTTP status:</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; dsv4-tp4</p>
+<pre><code>import subprocess, requests, time, os, signal, json
+URL = "http://127.0.0.1:1919"
+
+def health():
+    try: return requests.get(URL + "/health", timeout=5).json()
+    except Exception: return None
+
+log = open("/kaggle/working/serve.log", "w")   <u># /kaggle/working is saved as output</u>
+srv = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                       <b>start_new_session=True</b>)   <u># own process group, so we can kill it</u>
+
+t0 = time.time()
+while time.time() - t0 &lt; 7200:
+    h = health()
+    if h:
+        <b>if h.get("status") == "ok": break</b>        <u># the gate -- NOT response.ok</u>
+        if h.get("status") == "error": raise RuntimeError(h.get("message"))
+        pr = h.get("progress") or {}                <u># done_bytes / total_bytes while loading</u>
+    if srv.poll() is not None:                      <u># it died; the log has why</u>
+        raise RuntimeError(open("/kaggle/working/serve.log").read()[-4000:])
+    time.sleep(5)
+print("ready in", round(time.time() - t0), "s")
+
+def hard_stop():
+    <u># terminate() leaves the TP rank workers alive and they keep the port</u>
+    try: os.killpg(os.getpgid(srv.pid), signal.SIGTERM)
+    except Exception: pass
+    subprocess.run("pkill -9 -f 'ft serve' || true", shell=True)</code></pre>
+
+<p>Loading takes about nine minutes, so it pays to know which lines matter. These seven lines tell you everything about whether your configuration is sensible.</p>
+
+<p class="where w-out">Output &mdash; serve log on the GPU box</p>
+<pre><code><b>[1]</b> Resolved config: moe_backend='offload', attention_backend='dsv4_sparse',
+                 cache_type='swa_radix', page_size=128
+<b>[2]</b> torch intra-op threads: 48 -> 12 per rank (4 ranks share this host)
+<b>[3]</b> Free memory before loading model: 20.70 GiB
+<b>[4]</b> Weights: 3.32 GiB declared by parameters, 3.38 GiB measured on device
+<b>[5]</b> --moe-cache-auto resolved moe_cache_size=4080 num_pages=500
+<b>[6]</b> Allocating 32768 tokens for DSV4 KV cache (52 window pages), total = 1.08 GiB
+<b>[7]</b> Start capturing CUDA graphs with sizes: [1, 2, 4]
+    Free GPU memory after capturing CUDA graphs: 2.71 GiB
+    STATUS OK in 525s</code></pre>
+
+<ol>
+  <li><strong>Resolved config.</strong> Confirms the backend you asked for survived auto-resolution. <code>dsv4_sparse</code> attention and <code>swa_radix</code> cache were chosen for you; if you see <code>fused</code> here on a model this size, stop, because it will not fit.</li>
+  <li><strong>Thread split.</strong> Four ranks share one host, so each gets a quarter of the cores. If this line is missing, your ranks are each spawning a full-machine thread pool and fighting each other.</li>
+  <li><strong>Free memory before loading.</strong> Your real budget, measured after the CUDA context exists. 20.70 GiB of a nominal 22.5.</li>
+  <li><strong>Declared vs measured.</strong> The gap between what the parameters claim and what the load actually cost is resident-but-unaccounted memory &mdash; staging buffers, per-layer scratch. 60&#8239;MiB here, which is healthy. A large gap comes straight out of your cache budget.</li>
+  <li><strong>What auto decided.</strong> 4080 expert slots out of 11,008 total (43 layers &#215; 256), and 500 KV pages. This is the line to watch when tuning.</li>
+  <li><strong>Actual KV pool.</strong> 32,768 tokens for 1.08 GiB. Note this is nowhere near the model's advertised 1M context &mdash; the solver sized it to the memory that was left.</li>
+  <li><strong>Graph capture.</strong> Batch sizes 1, 2 and 4, costing about 0.8 GiB. If capture fails here, lower <code>--cuda-graph-max-bs</code>.</li>
+</ol>
+
+<p>Then check the cards agree with each other:</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; dsv4-tp4</p>
+<pre><code><span class="p">$</span> nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader
+0, <b>19789 MiB</b>, 23034 MiB
+1, <b>19789 MiB</b>, 23034 MiB
+2, <b>19789 MiB</b>, 23034 MiB
+3, <b>19789 MiB</b>, 23034 MiB</code></pre>
+
+<p>Four identical figures is the signature of real sharding. If one rank is much larger than the others, you are replicating something you meant to split.</p>
+
+<h2 id="step6">Step 6: Benchmark it</h2>
+
+<div class="nope">
+  <span class="lbl">What didn&rsquo;t work</span>
+  <ul>
+    <li><strong>The engine&rsquo;s own throughput counters.</strong> On short replies they reported 0.13, then 5.42, then 1392.89 tok/s for one request. We nearly filed the first as a performance bug.</li>
+    <li><strong>Reading <code>delta.content</code> from the stream.</strong> This is a reasoning model; tokens arrive as <code>delta.reasoning_content</code>. We logged thirty minutes of "hang" on a server that was working perfectly.</li>
+  </ul>
+</div>
+
+<h3>The client</h3>
+
+<p>The served model id is the basename of <code>--model-path</code>, so here it is literally <code>"1"</code>. Check it rather than guessing: <code>GET /v1/models</code>. And read <strong>both</strong> content channels &mdash; this is a reasoning model, so on many prompts every token arrives as <code>reasoning_content</code> and a client watching only <code>content</code> sees an empty stream forever:</p>
+
+<p class="where w-nb">Kaggle notebook cell &mdash; dsv4-tp4</p>
+<pre><code>MID = requests.get(URL + "/v1/models", timeout=30).json()["data"][0]["id"]
+
+t0 = time.time(); first = None; n = 0; out = []
+with requests.post(URL + "/v1/chat/completions", stream=True, timeout=900, json={
+        "model": MID, "stream": True, "max_tokens": 256, "temperature": 0.0,
+        "messages": [{"role": "user", "content": "Explain in 150 words why MoE "
+                      "expert offload lets a 167GB model serve from 96GB of VRAM."}]}) as r:
+    for line in r.iter_lines():
+        if not line or not line.startswith(b"data: "): continue
+        if line == b"data: [DONE]": break
+        d = (json.loads(line[6:]).get("choices") or [{}])[0].get("delta", {})
+        <b>tok = d.get("content") or d.get("reasoning_content")</b>   <u># BOTH channels</u>
+        if tok:
+            if first is None: first = time.time() - t0
+            out.append(tok); n += 1
+
+dt = time.time() - t0
+print(f"TTFT {first:.2f}s   decode {(n-1)/(dt-first):.2f} tok/s   {n} tokens")</code></pre>
+
+<p>Time it client-side like this, over a couple of hundred tokens. The engine's own counters are not a substitute, for the reason below.</p>
+
+<h3>The memory side</h3>
+
+<p>19,789 MiB used of 23,034 on every card, with about 2.7&#8239;GiB free after graph capture. The expert cache holds 4080 of 11,008 experts, roughly 37%. That leftover VRAM is the tuning headroom: more slots means a higher cache hit rate and fewer PCIe fetches per token.</p>
+
+<h3>The speed side</h3>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Measure</th><th>Result</th><th>Conditions</th></tr></thead>
+  <tbody>
+    <tr><td>Load time</td><td class="n">525 s</td><td>Serial expert read from NFS</td></tr>
+    <tr><td>Prefill (request A)</td><td class="n">1331 tokens / 16.3 s</td><td>Non-streamed, 31 tokens out; end-to-end</td></tr>
+    <tr><td>TTFT (request B)</td><td class="n">6.11 s</td><td><strong>Different request</strong> &mdash; a ~25-token prompt, not the 1331-token one above</td></tr>
+    <tr><td>Decode (request B)</td><td class="n">20.37 tok/s</td><td>226 tokens, greedy, batch 1, timed client-side</td></tr>
+    <tr><td>Sampled decode</td><td class="n">OK</td><td>temperature 0.6, 63 tokens</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>About 20 tokens per second on hardware that can hold barely half the model. The limiter is PCIe expert traffic, not compute, which is exactly what you would expect from the design.</p>
+
+<h3>One number we threw away, and why</h3>
+
+<p>Our first decode measurements came from the scheduler's own log lines during three-token replies:</p>
+
+<p class="where w-out">Output &mdash; serve log, and why you should not trust it</p>
+<pre><code>Decode batch, #running-req: 1, #token: 128, gen throughput (token/s): <i>0.13</i>
+Decode batch, #running-req: 0, #token: 0,   gen throughput (token/s): <i>5.42</i>
+Decode batch, #running-req: 0, #token: 0,   gen throughput (token/s): <i>1392.89</i></code></pre>
+
+<p>0.13, then 5.42, then 1392.89 tok/s for the same request. None of those are the model's speed. The first includes prefill in its window, the last two are empty batches dividing by an interval where nothing was generated. A throughput counter needs a sustained run to mean anything.</p>
+
+<p>We nearly reported 0.13 tok/s as a catastrophic result and went hunting for a performance bug that did not exist. The honest number came from timing 226 streamed tokens end to end, client-side, which is the only measurement here we would defend.</p>
+
+<div class="callout warn">
+  <p><strong>What these numbers are not.</strong> Single run, one prompt shape, batch size 1, no concurrency testing. With 37% of experts cached and 2.7&#8239;GiB per card unused, 20.37 tok/s is a floor rather than a tuned result.</p>
+</div>
+
+<h2 id="step7">Step 7: Errors you will actually hit</h2>
+
+<h3>"TP &gt; 1 is not supported for this expert format"</h3>
+<p class="err">KernelSelectionError: triton: TP &gt; 1 is not supported for this expert format</p>
+<p>You are on released FreeToken rather than PR #70. Every quantized expert path gates TP>1. There is no flag for it; you need the patched runtime.</p>
+
+<h3>"moe_cache_size=128 is too small"</h3>
+<p class="err">ValueError: moe_cache_size=128 is too small: need at least num_experts=256 slots</p>
+<p>The offload cache needs at least one slot per expert per layer. And if prefill overlap is enabled &mdash; it is, by default &mdash; the true minimum is double that, which surfaces as a separate assertion about borrowing two full expert-layer buffers. Either pass at least <code>2 &#215; num_experts</code>, or use <code>--moe-cache-auto</code> and let it decide.</p>
+
+<h3>OutOfMemoryError in <code>_alloc_buffers</code></h3>
+<p class="err">OutOfMemoryError: Tried to allocate 206.00 MiB. GPU 0: 22.03 GiB total, 163.06 MiB free</p>
+<p>Almost always <code>--num-tokens</code>, per Step 4. You pinned a KV pool larger than the memory left after the expert cache took its share. Remove the flag and let the solver size it.</p>
+
+<h3>A silent hang with no log line at all</h3>
+<p class="err">(no error, no "Prefill batch" line, GPU pinned at 100% utilisation)</p>
+<p>On sm_89 with torch&nbsp;&lt;&nbsp;2.12, row-wise <code>torch._scaled_mm</code> launches its CUTLASS stream-K kernel off the current stream. Issued from a side stream at M&nbsp;&ge;&nbsp;256 it stalls the GPU outright, and DSV4's FP8 fused q/k/v projection takes exactly that path. This is <a href="https://github.com/pytorch/pytorch/commit/252bb4a398db09ccd254dbb51672af311acabc46">pytorch/pytorch#177651</a>, fixed in torch 2.12.</p>
+<p>FreeToken kept its 2.11 pin and shipped an in-tree workaround in PR #243. PR #70 branched before that landed, so a build from it reintroduces the hang &mdash; apply #243's diff to PR #70's copy of <code>fp8_pertensor_linear.py</code>, not to <code>main</code>'s, which has diverged past it.</p>
+<p><strong>L4 is sm_89 and the default wheel is torch 2.11.0+cu130.</strong> If you serve FP8 models on Ada cards, check this pair before you debug anything else.</p>
+
+<h3>All four workers die, but only on prompts over 32 tokens</h3>
+<p class="err">ImportError: sgl_kernel/sm100/common_ops.abi3.so: undefined symbol: _ZNR5torch7Library4_def...</p>
+<p>A 32-token cliff looks like a batching bug. It is a packaging bug. FreeToken decides whether fused CUDA kernels are available like this:</p>
+<p class="where w-src">FreeToken source &mdash; reference</p>
+<pre><code><u># kernel/backend.py</u>
+def _importable(name) -&gt; bool:
+    try:
+        return importlib.util.find_spec(name) is not None   <i># no import side effects</i>
+    except Exception:
+        return False</code></pre>
+<p><code>find_spec</code> proves a package <em>exists</em>; it never imports it. Our <code>sgl_kernel</code> existed and raised on import &mdash; it was loading its sm100 (Blackwell) variant on an Ada card, and that <code>.so</code> carried an undefined torch symbol from a different torch build. FreeToken read it as available, the MoE took the fused path, and the real import blew up inside the forward pass.</p>
+<p>The 32 comes from the routing crossover:</p>
+<p class="where w-src">FreeToken source &mdash; reference</p>
+<pre><code><u># models/deepseek_v4/moe.py :: _prefill_routed</u>
+if (hidden_states.shape[0] * self.top_k &gt;= self.num_experts
+        or cache.is_unpinned_layer(self.layer_id)):
+    return super()._prefill_routed(...)   <b># whole-layer streaming -&gt; fused path</b></code></pre>
+<p>With 256 experts and top_k 8 that is <code>8T &ge; 256</code>, so T&nbsp;&ge;&nbsp;32. Below the crossover, prefill uses the on-demand slot path and never touches the broken package. Five- and seven-token smoke tests pass and prove nothing. <strong>Fix: uninstall it, so the pure-Triton fallback engages as designed.</strong></p>
+
+<h3>An 1800-second stall during generation</h3>
+<p class="err">tvm_ffi/include/tvm/ffi/string.h(373): error: namespace "std" has no member "memcmp"</p>
+<p>Having learned the lesson above, we wrote a probe that imported each optional native package and removed any that failed. <code>flashinfer</code> imported fine, so it stayed &mdash; then JIT-compiled a kernel through nvcc at generation time, and its <code>tvm_ffi</code> headers do not compile against CUDA 13.4.</p>
+<p>"Imports cleanly" was still the wrong health check. For a library that compiles at runtime, whether it works is not knowable at import time. Remove it; Triton covers the same ops.</p>
+
+<div class="callout">
+  <p><strong>One that is not an engine error at all.</strong> If a streamed request returns nothing while the server looks healthy, check which field you are reading. DSV4-Flash is a reasoning model and FreeToken auto-selects <code>reasoning_parser='deepseekv32'</code>, so tokens arrive as <code>delta.reasoning_content</code>, not <code>delta.content</code>. We logged thirty minutes of "hang" that was entirely our own client.</p>
+</div>
+
+<h2 id="wrap">Wrapping up</h2>
+
+<p>Four things to carry out of this, all of them checks you can run in a minute.</p>
+
+<ol>
+  <li><strong>Count your dense weights, not your total weights.</strong> For a MoE model with offload, the fit question is whether the non-expert weights divided by your GPU count fit on one card, and whether host RAM holds the experts. 167&#8239;GB against 96&#8239;GB of VRAM sounds impossible and is not.</li>
+  <li><strong>Let the solver size the KV pool.</strong> A flag that names a resource is not always a constraint on it &mdash; <code>--num-tokens</code> overrides the fit check rather than informing it. If a knob and a solver both exist, find out which one wins before you tune.</li>
+  <li><strong>Check your architecture against your reference's.</strong> sm_86 and sm_89 are one generation apart and differ on exactly the kernel path that hung for us. "It works on their four GPUs" is not portable evidence.</li>
+  <li><strong>A broken optional package is worse than a missing one.</strong> <code>find_spec</code> proves a directory exists, nothing more. A present-but-unimportable native extension suppresses the fallback written for its absence, and a JIT library that imports may still fail to compile. Probe by importing, and for JIT libraries, by executing.</li>
+</ol>
+
+<p>The answer for this hardware is plain <code>--tensor-parallel-size 4</code> with <code>--moe-backend offload</code> and no cache flags at all &mdash; let auto solve it. And one last caution about the interconnect: with no NVLink, every expert miss is a PCIe round trip. That single fact is why the expert cache hit rate, not the GPU count, is the number worth tuning next.</p>
+
+<p>All of it reproduces from three notebooks: one that resolves the offline wheel bundle, one that builds the patched engine wheel, and <a href="https://www.kaggle.com/code/hisiterbk/dsv4-tp4">the serve notebook</a>, which attaches the other two as <code>kernel_sources</code>. Fork it, or clone it and push with <code>kaggle kernels push -p .</code></p>
+
+<h2 id="credits">Credits and references</h2>
+
+<ul>
+  <li><a href="https://www.kaggle.com/code/hisiterbk/dsv4-tp4">hisiterbk/dsv4-tp4</a> &mdash; the serving notebook behind every number in this post</li>
+  <li><a href="https://github.com/FlashML-org/FreeToken">FreeToken</a> &mdash; the MoE-offload inference engine used throughout</li>
+  <li><a href="https://github.com/FlashML-org/FreeToken/pull/70">PR #70</a> &mdash; DSV4 tensor-parallel runtime (commit <code>c066b38</code>)</li>
+  <li><a href="https://github.com/FlashML-org/FreeToken/pull/243">PR #243</a> &mdash; the sm_89 row-wise <code>_scaled_mm</code> workaround</li>
+  <li><a href="https://github.com/pytorch/pytorch/commit/252bb4a398db09ccd254dbb51672af311acabc46">pytorch/pytorch@252bb4a</a> &mdash; the upstream fix, landed in torch 2.12</li>
+  <li><a href="https://github.com/vllm-project/vllm/issues/38256">vLLM RFC #38256</a> &mdash; incremental MoE expert offloading, the feature that would make vLLM an option</li>
+  <li><a href="https://huggingface.co/blog/Doctor-Shotgun/llamacpp-moe-offload-guide">llama.cpp MoE offload guide</a> and <a href="https://github.com/kvcache-ai/ktransformers">KTransformers</a> &mdash; the two engines shipping expert offload today</li>
+</ul>
+<p class="post-colophon">Measured September 2026 on Kaggle free tier &mdash; 4&#215; NVIDIA L4 23,034&#8239;MiB, sm_89, driver 580.159.04, 188&#8239;GB host RAM, 46 vCPU, PCIe (no NVLink). Engine: FreeToken 0.1.2 at PR&nbsp;#70 (c066b38) with PR&nbsp;#243 backported.</p>

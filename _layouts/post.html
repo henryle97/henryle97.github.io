@@ -1,0 +1,46 @@
+---
+layout: base
+---
+
+<article class="post">
+  <header class="page-head post-head">
+    <div class="wrap">
+      <div class="post-col">
+        <a class="post-back" href="{{ '/blog/' | relative_url }}">← Blog</a>
+
+        <h1 class="page-title post-title">{{ page.title }}</h1>
+
+        {% if page.subtitle %}
+        <p class="post-standfirst">{{ page.subtitle }}</p>
+        {% endif %}
+
+        <p class="post-dateline">
+          <time datetime="{{ page.date | date_to_xmlschema }}">{{ page.date | date: '%B %-d, %Y' }}</time>
+          {%- if page.dateline %} · {{ page.dateline }}{% endif %}
+        </p>
+
+        {% if page.tags and page.tags.size > 0 %}
+        <ul class="tags post-tags">
+          {%- for tag in page.tags %}
+          <li class="tag">{{ tag }}</li>
+          {%- endfor %}
+        </ul>
+        {% endif %}
+      </div>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="post-col post-body">
+      {{ content }}
+    </div>
+  </div>
+
+  <footer class="post-foot">
+    <div class="wrap">
+      <div class="post-col">
+        <a class="post-back" href="{{ '/blog/' | relative_url }}">← All posts</a>
+      </div>
+    </div>
+  </footer>
+</article>
