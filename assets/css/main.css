@@ -15,6 +15,9 @@
   --accent: #2563eb;
   --accent-hover: #1d4ed8;
   --accent-soft: #eff6ff;
+  --post-crit: #b91c1c;
+  --post-crit-soft: #fef2f2;
+  --post-warn: #b45309;
 
   --max-w: 62rem;
   --gutter: 1.5rem;
@@ -905,6 +908,566 @@ ul {
 .reveal.is-visible {
   opacity: 1;
   transform: none;
+}
+
+/* --- Blog index ----------------------------------------------------------- */
+
+.post-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.post-item {
+  padding: 1.75rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.post-item:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.post-item-link {
+  display: block;
+  color: inherit;
+}
+
+.post-item-link:hover {
+  text-decoration: none;
+}
+
+.post-item-date {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.5rem;
+}
+
+.post-item-title {
+  font-size: 1.375rem;
+  margin-bottom: 0.5rem;
+  transition: color 0.15s ease;
+}
+
+.post-item-link:hover .post-item-title {
+  color: var(--accent);
+}
+
+.post-item-summary {
+  max-width: 44rem;
+  color: var(--text-soft);
+  font-size: 0.9375rem;
+  margin: 0;
+}
+
+.post-item .tags {
+  margin-top: 0.9rem;
+}
+
+.post-empty {
+  color: var(--muted);
+}
+
+/* --- Post: frame ---------------------------------------------------------- */
+
+/* Long-form reading column, centred inside the wider page wrap. */
+.post-col {
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+.post-head {
+  padding: 3rem 0 2rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2.5rem;
+}
+
+.post-back {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--muted);
+  margin-bottom: 1.25rem;
+}
+
+.post-back:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.post-title {
+  max-width: 22ch;
+}
+
+.post-standfirst {
+  font-size: 1.0625rem;
+  color: var(--text-soft);
+  margin: 0 0 1rem;
+}
+
+.post-dateline {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin: 0;
+}
+
+.post-tags {
+  margin-top: 1.1rem;
+}
+
+.post-foot {
+  padding: 2.5rem 0 4rem;
+}
+
+.post-foot .post-back {
+  margin: 0;
+}
+
+.post-colophon {
+  margin-top: 3rem;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+/* --- Post: body typography ------------------------------------------------ */
+
+.post-body {
+  font-size: 1.0625rem;
+  line-height: 1.72;
+  color: var(--text-soft);
+}
+
+.post-body h2 {
+  font-size: 1.5rem;
+  margin: 3rem 0 1rem;
+  padding-top: 1.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.post-body h3 {
+  font-size: 1.125rem;
+  margin: 2rem 0 0.7rem;
+}
+
+.post-body h4 {
+  font-size: 1rem;
+  margin: 1.75rem 0 0.5rem;
+}
+
+.post-body p {
+  margin: 0 0 1.1rem;
+}
+
+.post-body ul,
+.post-body ol {
+  margin: 0 0 1.15rem;
+  padding-left: 1.35rem;
+  list-style: revert;
+}
+
+.post-body li {
+  margin-bottom: 0.55rem;
+}
+
+.post-body strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.post-body a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+
+.post-body code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  padding: 0.12em 0.35em;
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* --- Post: table of contents ---------------------------------------------- */
+
+.post-body .toc {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1.1rem 1.3rem;
+  margin: 0 0 2.5rem;
+}
+
+.post-body .toc h2 {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.7rem;
+  padding: 0;
+  border: 0;
+}
+
+.post-body .toc ol {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.9375rem;
+}
+
+.post-body .toc li {
+  margin-bottom: 0.28rem;
+}
+
+.post-body .toc ul {
+  margin: 0.28rem 0 0.1rem;
+  padding-left: 1rem;
+  list-style: none;
+}
+
+.post-body .toc ul li {
+  margin-bottom: 0.2rem;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.post-body .toc ul li::before {
+  content: "– ";
+  color: var(--muted);
+}
+
+.post-body .toc a {
+  text-decoration: none;
+}
+
+.post-body .toc a:hover {
+  text-decoration: underline;
+}
+
+/* --- Post: TL;DR summary -------------------------------------------------- */
+
+.post-body .tldr {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius-sm);
+  padding: 1.1rem 1.3rem;
+  margin: 0 0 2rem;
+}
+
+.post-body .tldr h2 {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 0.75rem;
+  padding: 0;
+  border: 0;
+}
+
+.post-body .tldr ul {
+  margin: 0;
+  padding-left: 1.15rem;
+  font-size: 0.9375rem;
+}
+
+.post-body .tldr li:last-child {
+  margin-bottom: 0;
+}
+
+.post-body .tldr p {
+  margin: 0.85rem 0 0;
+  font-size: 0.875rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* --- Post: callouts and dead ends ----------------------------------------- */
+
+.post-body .callout {
+  border-left: 3px solid var(--accent);
+  padding: 0.15rem 0 0.15rem 1rem;
+  margin: 1.3rem 0;
+  color: var(--muted);
+}
+
+.post-body .callout p {
+  margin: 0.5rem 0;
+}
+
+.post-body .callout strong {
+  color: var(--text);
+}
+
+.post-body .callout.warn {
+  border-left-color: var(--post-warn);
+}
+
+/* "What didn't work" — the failed attempts, kept because they cost time. */
+.post-body .nope {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--post-crit);
+  background: var(--post-crit-soft);
+  border-radius: var(--radius-sm);
+  padding: 0.8rem 1rem;
+  margin: 0 0 1.6rem;
+}
+
+.post-body .nope .lbl {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--post-crit);
+  margin-bottom: 0.45rem;
+}
+
+.post-body .nope p {
+  margin: 0;
+  font-size: 0.9375rem;
+}
+
+.post-body .nope ul {
+  margin: 0.2rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.9375rem;
+}
+
+.post-body .nope li {
+  margin-bottom: 0.32rem;
+}
+
+.post-body .err {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--post-crit);
+  margin: 0 0 0.6rem;
+}
+
+/* --- Post: code blocks ---------------------------------------------------- */
+
+/* Label above a block saying which machine it runs on. */
+.post-body .where {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin: 1.3rem 0 0;
+  padding: 0.42rem 0.8rem;
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.post-body .where + pre {
+  margin-top: 0;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
+.post-body .w-local,
+.post-body .w-file {
+  color: var(--text);
+}
+
+.post-body .w-nb {
+  color: var(--accent);
+}
+
+.post-body .w-src {
+  font-style: italic;
+  letter-spacing: 0.06em;
+  text-transform: none;
+}
+
+.post-body pre {
+  margin: 1.1rem 0 1.4rem;
+  padding: 0.95rem 1rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.62;
+  color: var(--text);
+}
+
+.post-body pre code {
+  background: none;
+  padding: 0;
+  font-size: 1em;
+}
+
+/* Hand-marked emphasis inside code: b = the line that matters,
+   i = the failure, u = a comment, .p = the shell prompt. */
+.post-body pre b {
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.post-body pre i {
+  font-style: normal;
+  color: var(--post-crit);
+}
+
+.post-body pre u {
+  text-decoration: none;
+  color: var(--muted);
+}
+
+.post-body pre .p {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* --- Post: tables --------------------------------------------------------- */
+
+.post-body .tablewrap {
+  overflow-x: auto;
+  margin: 1.2rem 0 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.post-body table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.875rem;
+}
+
+.post-body th,
+.post-body td {
+  text-align: left;
+  padding: 0.55rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.post-body thead th {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--surface);
+  white-space: nowrap;
+}
+
+.post-body td.n {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.post-body td.f {
+  font-family: var(--font-mono);
+  font-size: 0.94em;
+  white-space: nowrap;
+}
+
+.post-body tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* --- Post: inline diagram ------------------------------------------------- */
+
+.post-body figure {
+  margin: 1.5rem 0;
+  overflow-x: auto;
+}
+
+.post-body .dg {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0 0 0.6rem;
+}
+
+.post-body .dg-box {
+  fill: var(--bg);
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.post-body .dg-box-hi {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.post-body .dg-t {
+  fill: var(--text);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.post-body .dg-s {
+  fill: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.post-body .dg-a {
+  stroke: var(--accent);
+  fill: none;
+  stroke-width: 1.5;
+}
+
+.post-body .dg-lbl {
+  fill: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+/* JetBrains Mono runs wider than the diagram was drawn for, so the arrow
+   labels sit a touch smaller to stay clear of the boxes either side. */
+.post-body .dg-cap {
+  fill: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.post-body figcaption {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  line-height: 1.6;
+  color: var(--muted);
+  margin: 0 0 1.5rem;
+}
+
+@media (max-width: 640px) {
+  /* Scaled to full width the diagram's 10px labels become unreadable, so let
+     the figure scroll instead. */
+  .post-body .dg {
+    width: 34rem;
+  }
+
+  .post-body h2 {
+    font-size: 1.3125rem;
+  }
+
+  .post-body {
+    font-size: 1rem;
+  }
 }
 
 /* --- Responsive ----------------------------------------------------------- */
