@@ -938,6 +938,35 @@ ul {
   text-decoration: none;
 }
 
+/* With a thumbnail the row becomes image + text; without one it stays the
+   plain text card, so `thumbnail:` is safe to omit per post. */
+.post-item-link.has-thumb {
+  display: grid;
+  grid-template-columns: 13.5rem 1fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.post-item-thumb {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  aspect-ratio: 16 / 9;
+}
+
+.post-item-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.3s ease;
+}
+
+.post-item-link:hover .post-item-thumb img {
+  transform: scale(1.03);
+}
+
 .post-item-date {
   display: block;
   font-family: var(--font-mono);
@@ -1018,6 +1047,31 @@ ul {
 
 .post-tags {
   margin-top: 1.1rem;
+}
+
+.post-hero {
+  margin: 0 auto 2.5rem;
+}
+
+.post-hero img {
+  width: 100%;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  /* Declared up front so the body below doesn't reflow once the image loads.
+     16:9 matches the title cards, which run text to the edges — a 1.91:1 crop
+     would shave the headline and the footer line off them. */
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+.post-hero figcaption {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--muted);
+  margin-top: 0.7rem;
 }
 
 .post-foot {
@@ -1455,6 +1509,11 @@ ul {
 }
 
 @media (max-width: 640px) {
+  .post-item-link.has-thumb {
+    grid-template-columns: 1fr;
+    gap: 0.9rem;
+  }
+
   /* Scaled to full width the diagram's 10px labels become unreadable, so let
      the figure scroll instead. */
   .post-body .dg {

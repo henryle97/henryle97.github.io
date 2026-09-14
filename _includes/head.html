@@ -14,7 +14,7 @@
 {%- assign meta_title = meta_title | strip -%}
 {%- assign meta_description = meta_description | strip -%}
 {%- assign canonical = page.url | absolute_url | replace: 'index.html', '' -%}
-{%- assign share_img = page.share-img | default: site.share-img -%}
+{%- assign share_img = page.share-img | default: page.thumbnail | default: site.share-img -%}
 
 <head>
   <meta charset="utf-8">

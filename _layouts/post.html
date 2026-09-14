@@ -30,6 +30,19 @@ layout: base
     </div>
   </header>
 
+  {% if page.thumbnail and page.thumbnail-hero != false %}
+  <div class="wrap">
+    <figure class="post-col post-hero">
+      <img src="{{ page.thumbnail | relative_url }}"
+           alt="{{ page.thumbnail-alt | default: page.title | xml_escape }}"
+           decoding="async">
+      {%- if page.thumbnail-caption %}
+      <figcaption>{{ page.thumbnail-caption }}</figcaption>
+      {%- endif %}
+    </figure>
+  </div>
+  {% endif %}
+
   <div class="wrap">
     <div class="post-col post-body">
       {{ content }}
